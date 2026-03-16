@@ -7,8 +7,10 @@ orjson==3.10.15
 python-multipart==0.0.9
 python-dotenv>=1.0.0
 defusedxml>=0.7.1
+tzdata>=2024.1
 
 psycopg2-binary>=2.9.9
+shapely>=2.0
 stripe>=8.0.0
 supabase>=2.0.0
 PyJWT[crypto]>=2.8.0

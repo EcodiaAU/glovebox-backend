@@ -24,10 +24,16 @@ router = APIRouter(prefix="/places")
 _mapbox: MapboxGeocoding | None = None
 
 
-def _get_mapbox() -> MapboxGeocoding:
+def get_cache_conn():
+    raise RuntimeError("cache conn must be provided by app dependency override")
+
+
+def _get_mapbox(conn=None) -> MapboxGeocoding:
     global _mapbox
     if _mapbox is None:
-        _mapbox = MapboxGeocoding()
+        _mapbox = MapboxGeocoding(conn=conn)
+    elif conn is not None and _mapbox.conn is None:
+        _mapbox.conn = conn
     return _mapbox
 
 
@@ -88,6 +94,7 @@ _SUGGEST_DEFAULT_CATS: list[PlaceCategory] = [
 def places_search(
     req: PlacesRequest,
     places: Places = Depends(get_places_service),
+    cache_conn=Depends(get_cache_conn),
 ) -> PlacesPack:
     # Text query → try Mapbox geocoding first (forward search)
     if req.query and req.query.strip():
@@ -102,7 +109,7 @@ def places_search(
         limit = min(req.limit or 10, 10)
 
         try:
-            mapbox = _get_mapbox()
+            mapbox = _get_mapbox(conn=cache_conn)
             return mapbox.search(
                 query=req.query.strip(),
                 proximity=proximity,

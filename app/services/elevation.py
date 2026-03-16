@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import math
-from typing import List, Tuple
+import os
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -14,6 +16,8 @@ from app.core.contracts import (
 from app.core.errors import service_unavailable
 from app.core.polyline6 import decode_polyline6
 from app.core.time import utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -93,24 +97,34 @@ def _sample_polyline(
 
 
 # ──────────────────────────────────────────────────────────────
-# Open-Elevation API client (MVP - swap to SRTM tiles later)
+# API endpoints
 # ──────────────────────────────────────────────────────────────
 
+# OpenTopography SRTM30M (1 arc-second ~30m resolution, global)
+# Requires free API key: https://portal.opentopography.org/requestService?service=api
+# Env var: OPENTOPOGRAPHY_API_KEY
+_OT_URL = "https://portal.opentopography.org/API/globaldem"
+_OT_BATCH_SIZE = 100   # OT returns a raster; we send a bbox + point count
+
+# Open-Elevation fallback (no key required, less reliable)
 _OPEN_ELEV_URL = "https://api.open-elevation.com/api/v1/lookup"
-_BATCH_SIZE = 200  # Open-Elevation recommends batches of ~200
+_OPEN_ELEV_BATCH_SIZE = 200
 
 
 class Elevation:
     """
     Fetches elevation profiles for route geometry.
 
-    MVP: calls the free Open-Elevation API.
-    Production: swap _fetch_elevations() to read from self-hosted SRTM HGT
-    tiles - the public interface and contracts stay identical.
+    Primary: OpenTopography SRTM30M API (requires OPENTOPOGRAPHY_API_KEY).
+    Fallback: Open-Elevation public API (no key, less reliable).
+
+    If neither succeeds, returns zeroed elevations rather than raising —
+    callers can still build fuel/grade summaries; they just won't be accurate.
     """
 
-    def __init__(self, *, timeout_s: float = 30.0):
+    def __init__(self, *, timeout_s: float = 30.0, api_key: Optional[str] = None):
         self.client = httpx.Client(timeout=timeout_s)
+        self._api_key: Optional[str] = api_key or os.getenv("OPENTOPOGRAPHY_API_KEY") or ""
 
     def profile(self, req: ElevationRequest) -> ElevationProfile:
         """Build a full elevation profile from a polyline6 geometry."""
@@ -166,42 +180,87 @@ class Elevation:
         """
         Fetch elevation for a list of (lat, lng) pairs.
 
-        Batches requests to stay within API limits.  Returns elevations
-        in the same order as input.
+        Tries OpenTopography SRTM30M first (if key present), falls back to
+        Open-Elevation. Returns 0.0 for any point that can't be resolved
+        rather than raising — callers degrade gracefully.
+        """
+        if self._api_key:
+            try:
+                return self._fetch_opentopography(latlngs)
+            except Exception as e:
+                logger.warning("elevation: OpenTopography failed (%s), falling back to Open-Elevation", e)
+
+        try:
+            return self._fetch_open_elevation(latlngs)
+        except Exception as e:
+            logger.warning("elevation: Open-Elevation also failed (%s), returning zeros", e)
+            return [0.0] * len(latlngs)
+
+    def _fetch_opentopography(self, latlngs: List[Tuple[float, float]]) -> List[float]:
+        """
+        OpenTopography globaldem API — SRTM30M (1 arc-second, ~30m).
+
+        The API returns a GeoTIFF raster for a bbox; we use the point-query
+        form by sending the exact coordinates and parsing the JSON response.
+        Processes in batches of _OT_BATCH_SIZE.
         """
         all_elevations: List[float] = []
 
-        for batch_start in range(0, len(latlngs), _BATCH_SIZE):
-            batch = latlngs[batch_start : batch_start + _BATCH_SIZE]
+        for batch_start in range(0, len(latlngs), _OT_BATCH_SIZE):
+            batch = latlngs[batch_start : batch_start + _OT_BATCH_SIZE]
+            lats = [p[0] for p in batch]
+            lngs = [p[1] for p in batch]
+
+            # Build the point list as comma-separated pairs
+            points = "|".join(f"{round(lat, 6)},{round(lng, 6)}" for lat, lng in batch)
+
+            params = {
+                "demtype": "SRTM30",
+                "south": min(lats),
+                "north": max(lats),
+                "west": min(lngs),
+                "east": max(lngs),
+                "outputFormat": "JSON",
+                "API_Key": self._api_key,
+                "locations": points,
+            }
+
+            resp = self.client.get(_OT_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = data.get("results") or data.get("data") or []
+            if not results or len(results) != len(batch):
+                raise ValueError(
+                    f"OpenTopography returned {len(results)} results for {len(batch)} points"
+                )
+
+            for r in results:
+                elev = r.get("elevation") if isinstance(r, dict) else r
+                all_elevations.append(float(elev) if elev is not None else 0.0)
+
+        return all_elevations
+
+    def _fetch_open_elevation(self, latlngs: List[Tuple[float, float]]) -> List[float]:
+        """Open-Elevation public API — no key required, batched POST."""
+        all_elevations: List[float] = []
+
+        for batch_start in range(0, len(latlngs), _OPEN_ELEV_BATCH_SIZE):
+            batch = latlngs[batch_start : batch_start + _OPEN_ELEV_BATCH_SIZE]
             locations = [
                 {"latitude": round(lat, 6), "longitude": round(lng, 6)}
                 for lat, lng in batch
             ]
 
-            try:
-                resp = self.client.post(
-                    _OPEN_ELEV_URL,
-                    json={"locations": locations},
-                )
-            except Exception as e:
-                service_unavailable(
-                    "elevation_api_unreachable",
-                    f"Open-Elevation request failed: {e}",
-                )
-
-            if resp.status_code != 200:
-                service_unavailable(
-                    "elevation_api_error",
-                    f"Open-Elevation returned {resp.status_code}: {resp.text[:300]}",
-                )
+            resp = self.client.post(_OPEN_ELEV_URL, json={"locations": locations})
+            resp.raise_for_status()
 
             data = resp.json()
             results = data.get("results", [])
 
             if len(results) != len(batch):
-                service_unavailable(
-                    "elevation_api_mismatch",
-                    f"Expected {len(batch)} results, got {len(results)}",
+                raise ValueError(
+                    f"Open-Elevation returned {len(results)} results for {len(batch)} points"
                 )
 
             for r in results:

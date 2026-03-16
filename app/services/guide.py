@@ -10,12 +10,12 @@ import math
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import logging
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,6 @@ from app.core.contracts import (
     PlacesRequest,
     CorridorPlacesRequest,
     PlacesSuggestRequest,
-    GuideToolName,
-    GuideActionType,
     GuideMsg,
     TripProgress,
     WirePlace,
@@ -63,6 +61,97 @@ def _trip_phase(progress: TripProgress | None, total_km: float | None) -> str:
         return "home_stretch"
     else:
         return "arriving"
+
+
+
+def _format_route_score(route_score: Dict[str, Any] | None) -> str:
+    """Format RouteIntelligenceScore summary dict as a concise system prompt section."""
+    if not route_score:
+        return ""
+    overall = route_score.get("overall", 0)
+    label = route_score.get("overall_label", "")
+    summary = route_score.get("summary", "")
+    lines = [f"## Route Intelligence Score\nOverall: {overall}/10 ({label})"]
+    worst = route_score.get("worst_category")
+    if worst:
+        lines.append(f"Weakest: {worst.get('name','?')} ({worst.get('score',0)}/10)")
+    for cat in ("safety", "conditions", "services", "weather"):
+        c = route_score.get(cat, {})
+        if not c:
+            continue
+        score = c.get("score", 0)
+        factors = c.get("factors", [])
+        factor_str = "; ".join(factors[:3]) if factors else "No concerns"
+        lines.append(f"{cat.capitalize()}: {score}/10 — {factor_str}")
+    if summary:
+        lines.append(f"Summary: {summary}")
+    return "\n".join(lines)
+
+
+def _format_flood_summary(flood: Dict[str, Any] | None) -> str:
+    if not flood:
+        return ""
+    active = flood.get("active_gauges", 0)
+    worst = flood.get("worst_severity", "minor")
+    lines = [f"## Flood\n{active} active gauge(s) — worst: {worst}"]
+    for g in flood.get("sample", [])[:3]:
+        trend = g.get("trend", "")
+        height = g.get("height_m")
+        h_str = f" ({height:.1f}m)" if height is not None else ""
+        lines.append(f"  • {g.get('name','?')}: {g.get('severity','?')}{h_str} {trend}")
+    return "\n".join(lines)
+
+
+def _format_coverage_summary(coverage: Dict[str, Any] | None) -> str:
+    if not coverage:
+        return ""
+    no_cov_km = coverage.get("total_no_coverage_km", 0)
+    gap_count = coverage.get("total_gap_count", 0)
+    best = coverage.get("best_carrier")
+    lines = [f"## Mobile Coverage\n{no_cov_km}km with no coverage, {gap_count} gap(s)"]
+    if best:
+        lines.append(f"Best carrier overall: {best}")
+    return "\n".join(lines)
+
+
+def _format_wildlife_summary(wildlife: Dict[str, Any] | None) -> str:
+    if not wildlife:
+        return ""
+    high = wildlife.get("high_risk_zones", 0)
+    km_markers = wildlife.get("high_risk_km_markers", [])
+    twilight = wildlife.get("has_twilight_risk", False)
+    lines = [f"## Wildlife\n{high} high-risk zone(s)"]
+    if km_markers:
+        lines.append(f"Hotspots: {', '.join(km_markers[:5])}")
+    if twilight:
+        lines.append("⚠ Twilight risk — kangaroos active at dawn/dusk along parts of route")
+    return "\n".join(lines)
+
+
+def _format_weather_summary(weather: Dict[str, Any] | None) -> str:
+    if not weather:
+        return ""
+    lines = [f"## Weather Along Route"]
+    temp = weather.get("temp_range_c")
+    if temp:
+        lines.append(f"Temperature: {temp}°C")
+    rain = weather.get("rain_sections", 0)
+    if rain:
+        markers = weather.get("rain_km_markers", [])
+        lines.append(f"Rain: {rain} section(s) — {', '.join(markers[:4])}")
+    if weather.get("windy_sections", 0):
+        lines.append(f"High wind: {weather['windy_sections']} section(s)")
+    if weather.get("twilight_danger_sections", 0):
+        lines.append(f"Twilight danger: {weather['twilight_danger_sections']} section(s)")
+    if weather.get("low_visibility_sections", 0):
+        lines.append(f"Low visibility: {weather['low_visibility_sections']} section(s)")
+    if weather.get("high_uv_sections", 0):
+        lines.append(f"High UV (8+): {weather['high_uv_sections']} section(s)")
+    if weather.get("extreme_heat"):
+        lines.append("⚠ Extreme heat (38°C+) on route")
+    if weather.get("near_freezing"):
+        lines.append("⚠ Near-freezing temps (≤2°C) — watch for ice")
+    return "\n".join(lines)
 
 
 def _format_conditions(ctx: GuideContext) -> str:
@@ -112,6 +201,44 @@ def _format_places(places: List[WirePlace]) -> str:
                 parts.append(f"ph: {p.phone}")
             if p.website:
                 parts.append(f"web: {p.website}")
+            # Free camping context for LLM
+            if cat in ("camp", "rest_area"):
+                if p.camp_type:
+                    parts.append(f"type:{p.camp_type}")
+                if p.free:
+                    parts.append("FREE")
+                elif p.price_per_night_aud is not None:
+                    parts.append(f"${p.price_per_night_aud:.0f}/night")
+                if p.overnight_allowed is not None:
+                    if p.overnight_allowed is True:
+                        note = "overnight:yes"
+                        if p.overnight_max_hours:
+                            note += f"({p.overnight_max_hours}hr max)"
+                        parts.append(note)
+                    elif p.overnight_allowed == "prohibited":
+                        parts.append("overnight:NO")
+                    else:
+                        parts.append("overnight:check-signage")
+                    if p.overnight_notes:
+                        parts.append(p.overnight_notes)
+                # Facility summary
+                facilities = []
+                if p.has_toilets:
+                    facilities.append("toilets")
+                if p.has_water:
+                    facilities.append("water")
+                if p.has_showers:
+                    facilities.append("showers")
+                if p.has_bbq:
+                    facilities.append("BBQ")
+                if facilities:
+                    parts.append("has:" + ",".join(facilities))
+                if p.pets_allowed:
+                    parts.append("pets:ok" if p.pets_allowed is True else "pets:lead")
+                if p.fires_allowed:
+                    parts.append("fires:yes" if p.fires_allowed is True else "fires:seasonal")
+                if p.max_stay_days:
+                    parts.append(f"max:{p.max_stay_days}d")
             lines.append(" | ".join(parts))
     return "\n".join(lines)
 
@@ -140,7 +267,6 @@ def _get_towns() -> Dict[str, Tuple[float, float]]:
     global _towns_cache
     if _towns_cache is None:
         from pathlib import Path
-        import functools
         data_file = Path(__file__).resolve().parent.parent / "data" / "guide" / "towns.json"
         if data_file.exists():
             raw = json.loads(data_file.read_text(encoding="utf-8"))
@@ -230,14 +356,21 @@ def _build_system_prompt(
         )
 
     location_hint = _location_hint(thread or [], progress.user_lat if progress else None, progress.user_lng if progress else None)
+    route_score_block = _format_route_score(ctx.route_score_summary)
+    flood_block = _format_flood_summary(ctx.flood_summary)
+    coverage_block = _format_coverage_summary(ctx.coverage_summary)
+    wildlife_block = _format_wildlife_summary(ctx.wildlife_summary)
+    weather_block = _format_weather_summary(ctx.weather_summary)
 
     prompt = f"""You are Roam Guide — the knowledgeable mate riding shotgun on an Aussie road trip. You know every highway, bakery, gorge pool, and pub from Broome to Byron.
 
 Trust your knowledge of Australia. Share stories, tips, warnings, and opinions freely — you're a travel companion, not a search engine. Use your tools to get specifics and current info.
 
-Be proactive: flag fuel gaps, fatigue risks, amazing nearby spots, and weather without being asked. Be vivid and specific.
+Be proactive: flag fuel gaps, fatigue risks, amazing nearby spots, weather, wildlife danger zones, flood warnings, and mobile coverage dead zones without being asked. Be vivid and specific. You have live overlay data — use it.
 
 Style: warm but not repetitive. Don't start every message with "G'day" — vary your openings naturally. Don't repeat info from earlier in the conversation. Get straight to the new stuff.
+
+When you have a Route Intelligence Score, reference its specific warnings naturally in your advice — don't just list them, weave them into your response (e.g. "I see there's no fuel for 287km past Coober Pedy — you'll want a full tank before you leave town.").
 
 ═══ TRIP ═══
 {ctx.label or 'Unnamed'} | {ctx.profile or 'drive'}{' | '+str(int(total_km))+'km' if total_km else ''}
@@ -249,7 +382,7 @@ Stops:
 {pos}{time_str}
 {_format_conditions(ctx)}
 {f"Progress: {progress.km_from_start:.0f}km along route. Focus on places ahead." if progress and progress.km_from_start > 0 else ""}
-
+{(chr(10) + route_score_block) if route_score_block else ""}{(chr(10) + weather_block) if weather_block else ""}{(chr(10) + flood_block) if flood_block else ""}{(chr(10) + wildlife_block) if wildlife_block else ""}{(chr(10) + coverage_block) if coverage_block else ""}
 ═══ NEARBY ═══
 {_format_places(relevant_places)}
 

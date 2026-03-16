@@ -22,11 +22,12 @@ class Settings(BaseSettings):
     osrm_profile: str = Field(default="driving", alias="OSRM_PROFILE")
     mapbox_token: str = Field(default="", alias="ROAM_MAPBOX_TOKEN")
     mapbox_country: str = Field(default="au", alias="ROAM_MAPBOX_COUNTRY")
+    mapbox_geocode_cache_seconds: int = Field(default=86400, alias="MAPBOX_GEOCODE_CACHE_SECONDS")  # 24h
 
     # Versioning
     algo_version: str = Field(default="navpack.v1.osrm.mld", alias="ALGO_VERSION")
     corridor_algo_version: str = Field(default="corridor.v1.edgesqlite", alias="CORRIDOR_ALGO_VERSION")
-    places_algo_version: str = Field(default="places.v1.overpass.tiled", alias="PLACES_ALGO_VERSION")
+    places_algo_version: str = Field(default="places.v2.overpass.enriched", alias="PLACES_ALGO_VERSION")
 
     # Corridor defaults
     corridor_buffer_m_default: int = Field(default=15000, alias="CORRIDOR_BUFFER_M_DEFAULT")
@@ -59,11 +60,11 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────────
 
     traffic_algo_version: str = Field(
-        default="traffic.v4.multistate",
+        default="traffic.v4.multistate+wa_incidents",
         alias="TRAFFIC_ALGO_VERSION",
     )
     hazards_algo_version: str = Field(
-        default="hazards.v3.multistate.cap",
+        default="hazards.v6.multistate.cap.radar+parks_all",
         alias="HAZARDS_ALGO_VERSION",
     )
 
@@ -109,9 +110,10 @@ class Settings(BaseSettings):
         default="https://api.transport.nsw.gov.au/v1/live/hazards",
         alias="NSW_TRAFFIC_BASE_URL",
     )
-    # Which hazard feeds to query (all 7 types available)
+    # Which hazard feeds to query (valid types: incidents, fires, roadworks, majorevent)
+    # floods, alpine, planned return 404 from this API
     nsw_traffic_feeds: str = Field(
-        default="incidents,fires,floods,alpine,roadworks,majorevent,planned",
+        default="incidents,fires,roadworks,majorevent",
         alias="NSW_TRAFFIC_FEEDS",
     )
 
@@ -137,15 +139,15 @@ class Settings(BaseSettings):
     )
 
     # ──────────────────────────────────────────────────────────────
-    # SA Traffic - Traffic SA + DIT outback road conditions
-    # NOTE: data.sa.gov.au GeoJSON feed is 404/dead as of Feb 2026.
-    # Disabled by default until a replacement feed is found.
+    # SA Traffic - SA GeoHub ArcGIS (trafficdata.geohub.sa.gov.au)
+    # Replaces the dead data.sa.gov.au GeoJSON feed (404 as of Feb 2026).
+    # Uses ArcGIS FeatureServer query endpoint; returns outSR=4326 WGS84.
     # ──────────────────────────────────────────────────────────────
 
-    sa_traffic_enabled: bool = Field(default=False, alias="SA_TRAFFIC_ENABLED")
-    sa_traffic_events_url: str = Field(
-        default="https://data.sa.gov.au/data/dataset/traffic-sa-road-events/resource/road-events.geojson",
-        alias="SA_TRAFFIC_EVENTS_URL",
+    sa_traffic_enabled: bool = Field(default=True, alias="SA_TRAFFIC_ENABLED")
+    sa_traffic_geohub_url: str = Field(
+        default="https://trafficdata.geohub.sa.gov.au/MapServer/5/query",
+        alias="SA_TRAFFIC_GEOHUB_URL",
     )
 
     # ──────────────────────────────────────────────────────────────
@@ -174,6 +176,14 @@ class Settings(BaseSettings):
     nt_road_report_url: str = Field(
         default="https://roadreport.nt.gov.au/api/Obstruction/GetAll",
         alias="NT_ROAD_REPORT_URL",
+    )
+    nt_emergency_announcements_url: str = Field(
+        default="https://roadreport.nt.gov.au/api/Announcement/GetEmergencyAnnouncements",
+        alias="NT_EMERGENCY_ANNOUNCEMENTS_URL",
+    )
+    nt_map_icons_url: str = Field(
+        default="https://roadreport.nt.gov.au/api/MapIcon/GetAll",
+        alias="NT_MAP_ICONS_URL",
     )
 
     # ──────────────────────────────────────────────────────────────
@@ -301,6 +311,72 @@ class Settings(BaseSettings):
     )
 
     # ──────────────────────────────────────────────────────────────
+    # National: RADAR Roadworks / Closures (federal, all states)
+    # ArcGIS FeatureServer - status='Active', outSR=4326
+    # ──────────────────────────────────────────────────────────────
+
+    radar_roadworks_enabled: bool = Field(default=True, alias="RADAR_ROADWORKS_ENABLED")
+    radar_roadworks_url: str = Field(
+        default=(
+            "https://spatial.infrastructure.gov.au/server/rest/services/Hosted/"
+            "RADAR_Curated_Prod_roadworks/FeatureServer/0/query"
+        ),
+        alias="RADAR_ROADWORKS_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
+    # State Park Alerts - QLD Parks, NSW NPWS, WA DBCA,
+    #                     VIC Parks Victoria, SA DEW, NT Parks, TAS PWS
+    # RSS 2.0 feeds for park closures and access alerts.
+    # WA DBCA off by default (JSON endpoint not confirmed).
+    # VIC/SA/NT/TAS off by default - no RSS endpoint confirmed reachable
+    # as of March 2026; set enabled=True once a working URL is found.
+    # ──────────────────────────────────────────────────────────────
+
+    parks_qld_alerts_enabled: bool = Field(default=True, alias="PARKS_QLD_ALERTS_ENABLED")
+    parks_qld_alerts_url: str = Field(
+        default="https://parks.qld.gov.au/xml/rss/parkalerts.xml",
+        alias="PARKS_QLD_ALERTS_URL",
+    )
+    parks_nsw_alerts_enabled: bool = Field(default=True, alias="PARKS_NSW_ALERTS_ENABLED")
+    parks_nsw_alerts_url: str = Field(
+        default="https://www.nationalparks.nsw.gov.au/api/rssfeed/get",
+        alias="PARKS_NSW_ALERTS_URL",
+    )
+    parks_wa_alerts_enabled: bool = Field(default=False, alias="PARKS_WA_ALERTS_ENABLED")
+    parks_wa_alerts_url: str = Field(
+        default="https://alerts.dbca.wa.gov.au/Home/map?atype=park-road-closures%2Cpark-closures%2Cpark-notification",
+        alias="PARKS_WA_ALERTS_URL",
+    )
+    # VIC - Parks Victoria RSS: no reachable endpoint confirmed (checked Mar 2026).
+    # parks.vic.gov.au/get-into-nature/park-alerts/rss returns HTML; API host refused.
+    parks_vic_alerts_enabled: bool = Field(default=False, alias="PARKS_VIC_ALERTS_ENABLED")
+    parks_vic_alerts_url: str = Field(
+        default="https://www.parks.vic.gov.au/get-into-nature/park-alerts/rss",
+        alias="PARKS_VIC_ALERTS_URL",
+    )
+    # SA - DEW / parks.sa.gov.au RSS: /alerts/rss returns 404 (checked Mar 2026).
+    parks_sa_alerts_enabled: bool = Field(default=False, alias="PARKS_SA_ALERTS_ENABLED")
+    parks_sa_alerts_url: str = Field(
+        default="https://www.parks.sa.gov.au/alerts/rss",
+        alias="PARKS_SA_ALERTS_URL",
+    )
+    # NT - Parks and Wildlife RSS: nt.gov.au and parksandwildlife.nt.gov.au
+    # both return 404 for RSS paths (checked Mar 2026).
+    parks_nt_alerts_enabled: bool = Field(default=False, alias="PARKS_NT_ALERTS_ENABLED")
+    parks_nt_alerts_url: str = Field(
+        default="https://nt.gov.au/leisure/parks-reserves/park-alerts/rss",
+        alias="PARKS_NT_ALERTS_URL",
+    )
+    # TAS - Parks and Wildlife Service RSS: parks.tas.gov.au RSS paths return
+    # 404 (checked Mar 2026).
+    parks_tas_alerts_enabled: bool = Field(default=False, alias="PARKS_TAS_ALERTS_ENABLED")
+    parks_tas_alerts_url: str = Field(
+        default="https://parks.tas.gov.au/explore-our-parks/park-alerts/rss",
+        alias="PARKS_TAS_ALERTS_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
     # TAS Direct Alert Feed - TasALERT (pending email permission)
     # Richer data at alert.tas.gov.au but requires emailing
     # info@alert.tas.gov.au for API access.
@@ -338,6 +414,108 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────────
     revenuecat_webhook_secret: str = Field(default="", alias="REVENUECAT_WEBHOOK_SECRET")
 
+    # ──────────────────────────────────────────────────────────────
+    # Weather overlay (disabled — Open-Meteo removed)
+    # ──────────────────────────────────────────────────────────────
+    weather_algo_version: str = Field(
+        default="weather.v1.disabled",
+        alias="WEATHER_ALGO_VERSION",
+    )
+    weather_cache_seconds: int = Field(default=3600, alias="WEATHER_CACHE_SECONDS")
+    weather_sample_interval_km: float = Field(default=50.0, alias="WEATHER_SAMPLE_INTERVAL_KM")
+
+    # ──────────────────────────────────────────────────────────────
+    # Fuel overlay - NSW FuelCheck, WA FuelWatch, Open Charge Map
+    # ──────────────────────────────────────────────────────────────
+
+    fuel_algo_version: str = Field(default="fuel.v4.gov", alias="FUEL_ALGO_VERSION")
+    fuel_cache_seconds: int = Field(default=1800, alias="FUEL_CACHE_SECONDS")  # 30min
+
+    # NSW FuelCheck - https://api.nsw.gov.au/Product/Index/22
+    nsw_fuel_enabled: bool = Field(default=True, alias="NSW_FUEL_ENABLED")
+    nsw_fuel_api_key: str = Field(default="", alias="NSW_FUEL_API_KEY")
+    nsw_fuel_api_secret: str = Field(default="", alias="NSW_FUEL_API_SECRET")
+    nsw_fuel_auth_header: str = Field(default="", alias="NSW_FUEL_AUTH_HEADER")
+
+    # WA FuelWatch RSS - https://www.fuelwatch.wa.gov.au/fuelwatch/fuelWatchRSS
+    # Free, no auth required. Covers all of WA including remote outback.
+    wa_fuel_enabled: bool = Field(default=True, alias="WA_FUEL_ENABLED")
+    wa_fuelwatch_rss_url: str = Field(
+        default="https://www.fuelwatch.wa.gov.au/fuelwatch/fuelWatchRSS",
+        alias="WA_FUELWATCH_RSS_URL",
+    )
+
+    # Open Charge Map - https://api.openchargemap.io/v3/
+    openchargemap_enabled: bool = Field(default=True, alias="OPENCHARGEMAP_ENABLED")
+    openchargemap_api_key: str = Field(default="", alias="OPENCHARGEMAP_API_KEY")
+
+    # PetrolSpy - DISABLED. IP concerns with scraping their internal webservice.
+    # Kept as dead code for reference. Use NSW FuelCheck + WA FuelWatch instead.
+    petrolspy_enabled: bool = Field(default=False, alias="PETROLSPY_ENABLED")
+
+    # QLD Fuel Price Reporting — https://www.fuelpricesqld.com.au
+    # Register at fuelpricesqld.com.au to obtain API token. Operated by Informed Sources.
+    qld_fuel_enabled: bool = Field(default=False, alias="QLD_FUEL_ENABLED")
+    qld_fuel_api_token: str = Field(default="", alias="QLD_FUEL_API_TOKEN")
+
+    # VIC Servo Saver Public API — https://service.vic.gov.au
+    # Apply for API Consumer ID at service.vic.gov.au. 24-hour data delay.
+    vic_fuel_enabled: bool = Field(default=False, alias="VIC_FUEL_ENABLED")
+    vic_fuel_consumer_id: str = Field(default="", alias="VIC_FUEL_CONSUMER_ID")
+
+    # SA Fuel Pricing — via CBS / Informed Sources aggregator
+    # Register as data publisher with Consumer and Business Services (CBS).
+    sa_fuel_enabled: bool = Field(default=False, alias="SA_FUEL_ENABLED")
+    sa_fuel_api_token: str = Field(default="", alias="SA_FUEL_API_TOKEN")
+
+    # ──────────────────────────────────────────────────────────────
+    # Flood gauge overlay - BOM KiWIS
+    # Station list from bom.gov.au/waterdata (~8000 stations nationally).
+    # Real-time readings via BOM KiWIS API (no auth required).
+    # Attribution: DATA_OWNER_NAME must be displayed per station.
+    # ──────────────────────────────────────────────────────────────
+
+    flood_algo_version: str = Field(default="flood.v2.bom.kiwis+catchments+shapely", alias="FLOOD_ALGO_VERSION")
+    flood_cache_seconds: int = Field(default=1800, alias="FLOOD_CACHE_SECONDS")  # 30min
+    flood_enabled: bool = Field(default=True, alias="FLOOD_ENABLED")
+    flood_station_refresh_hours: int = Field(default=24, alias="FLOOD_STATION_REFRESH_HOURS")
+    bom_kiwis_base_url: str = Field(default="http://www.bom.gov.au/waterdata/services", alias="BOM_KIWIS_BASE_URL")
+    bom_station_data_url: str = Field(default="https://www.bom.gov.au/waterdata/data/stationdata.json", alias="BOM_STATION_DATA_URL")
+    bom_flood_catchments_url: str = Field(default="https://hosting.wsapi.cloud.bom.gov.au/arcgis/rest/services/flood/National_Flood_Gauge_Network/FeatureServer", alias="BOM_FLOOD_CATCHMENTS_URL")
+
+    # ──────────────────────────────────────────────────────────────
+    # Rest Areas + Fatigue Management overlay (Overpass, static data)
+    # 24h cache TTL — rest areas rarely change
+    # ──────────────────────────────────────────────────────────────
+    rest_algo_version: str = Field(default="rest_areas.v3.overpass+qld+wa+nsw", alias="REST_ALGO_VERSION")
+    rest_cache_seconds: int = Field(default=86400, alias="REST_CACHE_SECONDS")
+    fatigue_max_gap_km: float = Field(default=180.0, alias="FATIGUE_MAX_GAP_KM")
+    fatigue_rest_interval_km: float = Field(default=180.0, alias="FATIGUE_REST_INTERVAL_KM")
+
+    # NSW TfNSW Rest Areas (requires Open Data API key)
+    nsw_rest_areas_enabled: bool = Field(default=False, alias="NSW_REST_AREAS_ENABLED")
+    nsw_rest_areas_api_key: str = Field(default="", alias="NSW_REST_AREAS_API_KEY")
+    nsw_rest_areas_url: str = Field(
+        default="https://api.transport.nsw.gov.au/v1/roads/spatial",
+        alias="NSW_REST_AREAS_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
+    # Mobile Coverage overlay — OpenCelliD bulk CSV (MCC 505 = Australia)
+    # Bulk download updated daily; cache for 24h (towers rarely move).
+    # No API key required for the free bulk download tier.
+    # ──────────────────────────────────────────────────────────────
+    coverage_algo_version: str = Field(default="coverage.v1.opencellid", alias="COVERAGE_ALGO_VERSION")
+    coverage_cache_seconds: int = Field(default=86400, alias="COVERAGE_CACHE_SECONDS")  # 24h
+    coverage_enabled: bool = Field(default=True, alias="COVERAGE_ENABLED")
+    opencellid_token: str = Field(default="", alias="OPENCELLID_TOKEN")
+    opencellid_download_url: str = Field(
+        default="https://opencellid.org/ocid/downloads?token={token}&type=mcc&file=505.csv.gz",
+        alias="OPENCELLID_DOWNLOAD_URL",
+    )
+    coverage_no_signal_gap_km: float = Field(default=50.0, alias="COVERAGE_NO_SIGNAL_GAP_KM")
+    opencellid_local_db_path: str = Field(default="data/celltowers/505.csv.gz", alias="OPENCELLID_LOCAL_DB_PATH")
+
     # Guide Web Search
     # Gives the guide live web search so it can answer about current
     # events, road conditions, new businesses, etc.
@@ -351,6 +529,131 @@ class Settings(BaseSettings):
     google_cse_api_key: str = Field(default="", alias="GOOGLE_CSE_API_KEY")
     google_cse_cx: str = Field(default="", alias="GOOGLE_CSE_CX")
     guide_search_timeout_s: float = Field(default=10.0, alias="GUIDE_SEARCH_TIMEOUT_S")
+
+    # ──────────────────────────────────────────────────────────────
+    # Wildlife Hazard Overlay — iNaturalist Node API v1
+    # Commercial-use CC licenses (cc0, cc-by) enforced at query time.
+    # Rate limit: 60 req/min (iNaturalist public API cap).
+    # ──────────────────────────────────────────────────────────────
+    wildlife_algo_version: str = Field(default="wildlife.v2.inaturalist.cc", alias="WILDLIFE_ALGO_VERSION")
+    wildlife_cache_seconds: int = Field(default=604800, alias="WILDLIFE_CACHE_SECONDS")  # 7 days
+    wildlife_enabled: bool = Field(default=True, alias="WILDLIFE_ENABLED")
+    wildlife_sample_interval_km: float = Field(default=50.0, alias="WILDLIFE_SAMPLE_INTERVAL_KM")
+    wildlife_radius_km: float = Field(default=25.0, alias="WILDLIFE_RADIUS_KM")
+    wildlife_per_page: int = Field(default=50, alias="WILDLIFE_PER_PAGE")
+    wildlife_rate_per_min: int = Field(default=60, alias="WILDLIFE_RATE_PER_MIN")
+    wildlife_timeout_s: float = Field(default=15.0, alias="WILDLIFE_TIMEOUT_S")
+    wildlife_photo_size: str = Field(default="medium", alias="WILDLIFE_PHOTO_SIZE")
+    # High-occurrence threshold for "high" risk classification
+    wildlife_high_risk_count: int = Field(default=10, alias="WILDLIFE_HIGH_RISK_COUNT")
+    wildlife_medium_risk_count: int = Field(default=3, alias="WILDLIFE_MEDIUM_RISK_COUNT")
+
+    # ──────────────────────────────────────────────────────────────
+    # Bushfire Overlay — NSW RFS + NASA FIRMS
+    # NSW RFS: free, no auth. FIRMS: free, requires API key from
+    # https://firms.modaps.eosdis.nasa.gov/api/area/
+    # Cache TTL 15 min — fires are time-critical.
+    # ──────────────────────────────────────────────────────────────
+    firms_map_key: str = Field(default="", alias="FIRMS_MAP_KEY")
+
+    # ──────────────────────────────────────────────────────────────
+    # Emergency Services overlay — GA Emergency Management Facilities
+    # ArcGIS MapServer (CC-BY 4.0, no auth required).
+    # Layers: 0=Ambulance, 1=Other, 2=Police, 3=Metro Fire,
+    #         4=Rural Fire, 5=SES
+    # ──────────────────────────────────────────────────────────────
+    emergency_algo_version: str = Field(
+        default="emergency.v1.ga.facilities",
+        alias="EMERGENCY_ALGO_VERSION",
+    )
+    emergency_cache_seconds: int = Field(default=86400, alias="EMERGENCY_CACHE_SECONDS")  # 24h
+    emergency_enabled: bool = Field(default=True, alias="EMERGENCY_ENABLED")
+    ga_emergency_base_url: str = Field(
+        default="http://services.ga.gov.au/gis/rest/services/Emergency_Management_Facilities/MapServer",
+        alias="GA_EMERGENCY_BASE_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
+    # Heritage & Protected Areas overlay — DCCEEW GIS services
+    # ArcGIS MapServer (CC-BY 3.0 AU, no auth required).
+    # World Heritage, National Heritage, Commonwealth Heritage, CAPAD.
+    # ──────────────────────────────────────────────────────────────
+    heritage_algo_version: str = Field(
+        default="heritage.v1.dcceew.capad",
+        alias="HERITAGE_ALGO_VERSION",
+    )
+    heritage_cache_seconds: int = Field(default=604800, alias="HERITAGE_CACHE_SECONDS")  # 7 days
+    heritage_enabled: bool = Field(default=True, alias="HERITAGE_ENABLED")
+    dcceew_gis_base_url: str = Field(
+        default="https://gis.environment.gov.au/gispubmap/rest/services/ogc_services",
+        alias="DCCEEW_GIS_BASE_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
+    # Air Quality overlay — OpenWeatherMap Air Pollution API
+    # Free tier: 1,000,000 calls/month. Requires free API key.
+    # ──────────────────────────────────────────────────────────────
+    aqi_algo_version: str = Field(
+        default="aqi.v1.owm",
+        alias="AQI_ALGO_VERSION",
+    )
+    aqi_cache_seconds: int = Field(default=3600, alias="AQI_CACHE_SECONDS")  # 1h
+    aqi_enabled: bool = Field(default=True, alias="AQI_ENABLED")
+    owm_api_key: str = Field(default="", alias="OWM_API_KEY")
+    aqi_sample_interval_km: float = Field(default=50.0, alias="AQI_SAMPLE_INTERVAL_KM")
+
+    # ──────────────────────────────────────────────────────────────
+    # Bushfire overlay — NSW RFS + NASA FIRMS
+    # NSW RFS: free, no auth. FIRMS: free, requires MAP_KEY.
+    # ──────────────────────────────────────────────────────────────
+    bushfire_algo_version: str = Field(
+        default="bushfire.v1.rfs+firms",
+        alias="BUSHFIRE_ALGO_VERSION",
+    )
+    bushfire_cache_seconds: int = Field(default=900, alias="BUSHFIRE_CACHE_SECONDS")  # 15min
+    bushfire_enabled: bool = Field(default=True, alias="BUSHFIRE_ENABLED")
+    nsw_rfs_url: str = Field(
+        default="https://www.rfs.nsw.gov.au/feeds/majorIncidents.json",
+        alias="NSW_RFS_BUSHFIRE_URL",
+    )
+    firms_url: str = Field(
+        default="https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/VIIRS_SNPP_NRT/AUS/1",
+        alias="FIRMS_URL",
+    )
+
+    # ──────────────────────────────────────────────────────────────
+    # Speed Cameras overlay — NSW TfNSW ArcGIS (CC-BY 3.0 AU)
+    # + Brisbane Council road occupancies (CC-BY 4.0)
+    # Both free, no auth required.
+    # ──────────────────────────────────────────────────────────────
+    cameras_algo_version: str = Field(
+        default="cameras.v1.nsw+brisbane",
+        alias="CAMERAS_ALGO_VERSION",
+    )
+    cameras_cache_seconds: int = Field(default=86400, alias="CAMERAS_CACHE_SECONDS")  # 24h
+    cameras_enabled: bool = Field(default=True, alias="CAMERAS_ENABLED")
+
+    # ──────────────────────────────────────────────────────────────
+    # Elevation overlay — OpenTopography SRTM30M (primary)
+    #                   + Open-Elevation (fallback, no key required)
+    # Free API key: https://portal.opentopography.org/requestService?service=api
+    # Leave blank to use Open-Elevation fallback only.
+    # ──────────────────────────────────────────────────────────────
+    opentopography_api_key: str = Field(default="", alias="OPENTOPOGRAPHY_API_KEY")
+    nsw_speed_cameras_url: str = Field(
+        default=(
+            "https://portal.data.nsw.gov.au/arcgis/rest/services/Hosted/"
+            "TFNSW_Speed_Cameras_public/FeatureServer/0/query"
+        ),
+        alias="NSW_SPEED_CAMERAS_URL",
+    )
+    brisbane_road_occupancies_url: str = Field(
+        default=(
+            "https://data.brisbane.qld.gov.au/api/explore/v2.1/catalog/datasets/"
+            "planned-temporary-road-occupancies/records"
+        ),
+        alias="BRISBANE_ROAD_OCCUPANCIES_URL",
+    )
 
 
 settings = Settings()

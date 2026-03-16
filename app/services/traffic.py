@@ -5,9 +5,9 @@ Multi-state Australian traffic overlay service.
 Supports:
   - QLD: Official QLD Traffic v2 events API + delta merge + GeoJSON feed fallback
   - NSW: TfNSW Live Traffic Hazards GeoJSON API (7 feed types)
-  - VIC: VicRoads Data Exchange (unplanned disruptions v2, planned, emergency closures)
-  - SA:  Traffic SA road events GeoJSON (disabled - feed is 404 as of Feb 2026)
-  - WA:  Main Roads WA ArcGIS road incidents (CC-BY 4.0)
+  - VIC: VicRoads Data Exchange (unplanned/planned/closures) + VicEmergency ArcGIS (crashes, flood, fire)
+  - SA:  SA GeoHub ArcGIS traffic events (trafficdata.geohub.sa.gov.au)
+  - WA:  Main Roads WA ArcGIS road incidents (CC-BY 4.0) + WebEoc real-time incidents/roadworks/closures/conditions
   - NT:  NT Road Report obstructions + road conditions (roadreport.nt.gov.au)
 
 Source selection is automatic based on the query bbox - a Brisbane→Sydney route
@@ -19,10 +19,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -33,16 +33,12 @@ from app.core.geo_registry import states_for_bbox
 from app.core.settings import settings
 from app.core.storage import get_traffic_pack, put_traffic_pack
 from app.core.time import utc_now_iso
+from app.core.cache_utils import is_fresh, stable_key
 
 
 # ══════════════════════════════════════════════════════════════
 # Shared helpers
 # ══════════════════════════════════════════════════════════════
-
-def _stable_key(prefix: str, obj: dict) -> str:
-    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"))
-    h = hashlib.sha256((prefix + "::" + raw).encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(h).decode("utf-8").rstrip("=")
 
 
 def _stable_id(parts: List[str]) -> str:
@@ -93,15 +89,6 @@ def _parse_iso_to_epoch(s: Optional[str]) -> Optional[float]:
         return dt.timestamp()
     except Exception:
         return None
-
-
-def _is_fresh(created_at: Optional[str], *, max_age_s: int) -> bool:
-    if max_age_s <= 0:
-        return False
-    ts = _parse_iso_to_epoch(created_at)
-    if ts is None:
-        return False
-    return (time.time() - ts) <= float(max_age_s)
 
 
 def _event_is_expired(end_str: Optional[str]) -> bool:
@@ -790,62 +777,132 @@ class _VicTrafficProvider:
 
 
 # ══════════════════════════════════════════════════════════════
-# SA Traffic - Traffic SA GeoJSON events
+# SA Traffic - SA GeoHub ArcGIS (trafficdata.geohub.sa.gov.au)
 # ══════════════════════════════════════════════════════════════
+
+_SA_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_SA_STRIP_WS_RE = re.compile(r"\s{2,}")
+
+
+def _strip_html(html: str) -> str:
+    """Strip HTML tags and normalise whitespace."""
+    text = _SA_HTML_TAG_RE.sub(" ", html)
+    return _SA_STRIP_WS_RE.sub(" ", text).strip()
+
+
+def _arcgis_geom_to_geojson(ag_geom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Convert an ArcGIS geometry dict to a GeoJSON geometry.
+    Handles rings (polygon) and paths (polyline).
+    Coordinates are expected in WGS84 (outSR=4326).
+    """
+    if not isinstance(ag_geom, dict):
+        return None
+    rings = ag_geom.get("rings")
+    if rings and isinstance(rings, list) and rings:
+        # Polygon - rings is list of coordinate rings [[lng, lat], ...]
+        return {"type": "Polygon", "coordinates": rings}
+    paths = ag_geom.get("paths")
+    if paths and isinstance(paths, list) and paths:
+        if len(paths) == 1:
+            return {"type": "LineString", "coordinates": paths[0]}
+        return {"type": "MultiLineString", "coordinates": paths}
+    x = ag_geom.get("x")
+    y = ag_geom.get("y")
+    if x is not None and y is not None:
+        try:
+            return {"type": "Point", "coordinates": [float(x), float(y)]}
+        except (ValueError, TypeError):
+            pass
+    return None
+
 
 class _SaTrafficProvider:
     """
-    Fetches Traffic SA road events in GeoJSON format.
-    Falls back gracefully if the feed is unavailable.
-    NOTE: data.sa.gov.au GeoJSON feed is 404/dead as of Feb 2026.
-    Disabled by default in settings. Kept for when a replacement emerges.
+    Fetches SA traffic events from the SA GeoHub ArcGIS endpoint.
+    Replaces the dead data.sa.gov.au GeoJSON feed (404 as of Feb 2026).
+
+    Endpoint: trafficdata.geohub.sa.gov.au/MapServer/5/query
+    Key response fields: LOCATION_ID, PLOT_TYPE, PLOT_DETAILS (HTML),
+      START_DATE (epoch ms), END_DATE (epoch ms), geometry (rings/paths).
     """
 
     def _parse_feature(self, feature: Dict[str, Any]) -> Optional[TrafficEvent]:
         if not isinstance(feature, dict):
             return None
 
-        props = feature.get("properties") or {}
-        if not isinstance(props, dict):
-            props = {}
+        attrs = feature.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
 
-        geom = feature.get("geometry") or None
-        bb = _bbox_from_geom(geom) if isinstance(geom, dict) else None
+        ag_geom = feature.get("geometry") or None
+        geom = _arcgis_geom_to_geojson(ag_geom) if isinstance(ag_geom, dict) else None
+        bb = _bbox_from_geom(geom) if geom else None
 
-        headline = str(
-            props.get("headline") or props.get("title") or props.get("description") or "SA traffic event"
-        ).strip()
-        desc = str(props.get("description") or props.get("advice") or "").strip()
-        end_at = props.get("end") or props.get("end_date") or props.get("expires") or None
+        plot_type = str(attrs.get("PLOT_TYPE") or "").strip()
+        plot_details_raw = str(attrs.get("PLOT_DETAILS") or "").strip()
+        plot_details = _strip_html(plot_details_raw) if plot_details_raw else ""
+        location_id = str(attrs.get("LOCATION_ID") or "").strip()
 
-        if _event_is_expired(str(end_at) if end_at else None):
+        # Build headline: prefer PLOT_DETAILS text; fall back to PLOT_TYPE
+        if plot_details:
+            # First non-empty sentence/line is the headline
+            first_line = plot_details.split(".")[0].strip()
+            headline = first_line if len(first_line) >= 8 else plot_details[:160]
+        elif plot_type:
+            headline = f"SA traffic: {plot_type}"
+        else:
+            headline = "SA traffic event"
+
+        desc = plot_details if plot_details and plot_details != headline else None
+
+        # Expiry from END_DATE (epoch ms, None means ongoing)
+        end_epoch_ms = attrs.get("END_DATE")
+        end_at: Optional[str] = None
+        if end_epoch_ms is not None:
+            try:
+                end_epoch = float(end_epoch_ms) / 1000.0
+                if end_epoch > 0:
+                    end_at = datetime.fromtimestamp(end_epoch, tz=timezone.utc).isoformat()
+            except (ValueError, TypeError):
+                pass
+        if end_at and _event_is_expired(end_at):
             return None
 
-        structured_type = props.get("event_type") or props.get("type") or None
-        typ, sev = _classify(headline, desc, structured_type=str(structured_type) if structured_type else None)
+        # Start date
+        start_at: Optional[str] = None
+        start_epoch_ms = attrs.get("START_DATE")
+        if start_epoch_ms is not None:
+            try:
+                start_epoch = float(start_epoch_ms) / 1000.0
+                if start_epoch > 0:
+                    start_at = datetime.fromtimestamp(start_epoch, tz=timezone.utc).isoformat()
+            except (ValueError, TypeError):
+                pass
 
-        upstream_id = str(feature.get("id") or props.get("id") or "").strip()
-        if upstream_id:
-            ev_id = _stable_id(["sa_traffic", upstream_id])
+        typ, sev = _classify(headline, desc or "", structured_type=plot_type or None)
+
+        if location_id:
+            ev_id = _stable_id(["sa_geohub", location_id])
         else:
-            ev_id = _stable_id(["sa_traffic", headline[:160], str(bb)])
+            ev_id = _stable_id(["sa_geohub", headline[:160], str(bb)])
 
         return TrafficEvent(
             id=ev_id,
             source="sa_traffic",
-            feed="events",
+            feed="geohub",
             type=typ,       # type: ignore
             severity=sev,   # type: ignore
             headline=headline,
-            description=(desc or None),
-            url=(str(props.get("url") or props.get("link") or "")),
-            last_updated=(str(props.get("last_updated") or props.get("updated") or "")),
-            start_at=(str(props.get("start") or props.get("start_date") or "")),
-            end_at=(str(end_at) if end_at else None),
-            geometry=(geom if isinstance(geom, dict) else None),
+            description=desc,
+            url="https://traffic.sa.gov.au/",
+            last_updated=start_at,
+            start_at=start_at,
+            end_at=end_at,
+            geometry=geom,
             bbox=bb,
             region="sa",
-            raw=props,
+            raw=attrs,
         )
 
     async def poll(
@@ -858,13 +915,30 @@ class _SaTrafficProvider:
         if not settings.sa_traffic_enabled:
             return []
 
-        url = settings.sa_traffic_events_url
-        if not url:
+        base_url = settings.sa_traffic_geohub_url
+        if not base_url:
             return []
+
+        # Build time-bounded query - events active right now
+        now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        where = (
+            f"1=1 and start_date <= to_date('{now_str}','YYYY-MM-DD HH24:MI:SS')"
+            f" and (end_date >= to_date('{now_str}','YYYY-MM-DD HH24:MI:SS') or end_date is null)"
+        )
+        params = {
+            "f": "json",
+            "where": where,
+            "returnGeometry": "true",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "*",
+            "outSR": "4326",
+            "resultOffset": "0",
+            "resultRecordCount": "2000",
+        }
 
         items: List[TrafficEvent] = []
         try:
-            r = await client.get(url, headers={"User-Agent": "roam/traffic"})
+            r = await client.get(base_url, params=params, headers={"User-Agent": "roam/traffic"})
             r.raise_for_status()
             data = r.json()
         except Exception as e:
@@ -1050,6 +1124,410 @@ class _WaTrafficProvider:
             items.append(ev)
 
         return items
+
+
+# ══════════════════════════════════════════════════════════════
+# VIC Emergency Incidents - ArcGIS FeatureServer supplement
+# ══════════════════════════════════════════════════════════════
+# Complements the VicRoads Data Exchange feed by adding fire, flood,
+# and vehicle incidents from VicEmergency (CFA/SES/VicPol joint feed).
+# No auth required. CC-BY 4.0.
+#
+# Useful incident types for Roam:
+#   VEHICLE — road crashes attended by emergency services
+#   FLOOD   — flood events affecting roads
+#   GRASS   — grass fires near roads
+
+_VIC_EMERGENCY_URL = (
+    "https://services1.arcgis.com/vHnIGBHHqDR6y0CR/arcgis/rest/services"
+    "/Vic_Emergency_Incidents/FeatureServer/0/query"
+)
+# Filter to incident types relevant to road travel
+_VIC_EMERGENCY_TYPES = ("VEHICLE", "FLOOD", "GRASS", "BUSHFIRE")
+_VIC_EMERGENCY_WHERE = (
+    "incidentType IN ('VEHICLE','FLOOD','GRASS','BUSHFIRE')"
+    " AND incidentStatus<>'Closed'"
+)
+
+
+class _VicEmergencyProvider:
+    """
+    Fetches active emergency incidents from VicEmergency ArcGIS FeatureServer
+    and converts them to TrafficEvent items.
+
+    Covers vehicle crashes and flood/fire events that affect road travel.
+    Works without any API key (public ArcGIS service).
+    """
+
+    def _parse_feature(self, feature: Dict[str, Any]) -> Optional[TrafficEvent]:
+        if not isinstance(feature, dict):
+            return None
+        props = feature.get("properties") or {}
+        if not isinstance(props, dict):
+            props = {}
+
+        incident_type = str(props.get("incidentType") or "").strip().upper()
+        status = str(props.get("incidentStatus") or "").strip()
+        location = str(props.get("incidentLocation") or "").strip()
+        last_updated = str(props.get("lastUpdateDateTime") or "").strip() or None
+
+        geom = feature.get("geometry") or None
+        geojson_geom: Optional[Dict[str, Any]] = geom if isinstance(geom, dict) else None
+        bb = _bbox_from_geom(geojson_geom) if geojson_geom else None
+
+        # Derive point for dedup key
+        lat: Optional[float] = None
+        lng: Optional[float] = None
+        if geojson_geom:
+            raw_coords = geojson_geom.get("coordinates")
+            gtype = geojson_geom.get("type")
+            if gtype == "Point" and isinstance(raw_coords, list) and len(raw_coords) >= 2:
+                try:
+                    lng, lat = float(raw_coords[0]), float(raw_coords[1])
+                except (TypeError, ValueError):
+                    pass
+
+        # Classify by incident type
+        if incident_type == "VEHICLE":
+            typ, sev = "incident", "major"
+        elif incident_type in ("FLOOD",):
+            typ, sev = "closure", "major"
+        elif incident_type in ("GRASS", "BUSHFIRE"):
+            typ, sev = "incident", "moderate"
+        else:
+            typ, sev = "incident", "minor"
+
+        headline = f"{incident_type.title()} — {location}" if location else f"VIC {incident_type.title()} incident"
+        description = f"Status: {status}" if status else None
+
+        upstream_id = str(props.get("objectid") or props.get("OBJECTID") or "").strip()
+        ev_id = _stable_id(["vic_emergency", incident_type, upstream_id or location[:80]])
+
+        return TrafficEvent(
+            id=ev_id,
+            source="vic_emergency",
+            feed=incident_type.lower(),
+            type=typ,      # type: ignore
+            severity=sev,  # type: ignore
+            headline=headline,
+            description=description,
+            url=None,
+            last_updated=last_updated,
+            start_at=last_updated,
+            end_at=None,
+            geometry=geojson_geom,
+            bbox=bb,
+            region="vic",
+            raw=props,
+        )
+
+    async def poll(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        bbox: BBox4,
+        warnings: List[str],
+    ) -> List[TrafficEvent]:
+        bbox_param = (
+            f"&geometry={bbox.minLng},{bbox.minLat},{bbox.maxLng},{bbox.maxLat}"
+            "&geometryType=esriGeometryEnvelope"
+            "&spatialRel=esriSpatialRelIntersects"
+            "&inSR=4326"
+        )
+        _where_enc = _VIC_EMERGENCY_WHERE.replace(" ", "%20").replace("'", "%27")
+        url = (
+            f"{_VIC_EMERGENCY_URL}"
+            f"?where={_where_enc}"
+            f"&outFields=incidentType,incidentLocation,incidentStatus,lastUpdateDateTime,objectid"
+            f"&f=geojson"
+            f"{bbox_param}"
+        )
+        try:
+            r = await client.get(url, headers={"User-Agent": "roam/traffic"})
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            warnings.append(f"traffic:vic_emergency failed: {e}")
+            return []
+
+        items: List[TrafficEvent] = []
+        for feat in (data.get("features") or []):
+            ev = self._parse_feature(feat)
+            if ev:
+                items.append(ev)
+        return items
+
+
+class _VicCompositeProvider:
+    """Combines VicRoads Data Exchange and VicEmergency ArcGIS feeds."""
+
+    def __init__(self) -> None:
+        self._data_exchange = _VicTrafficProvider()
+        self._emergency = _VicEmergencyProvider()
+
+    async def poll(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        bbox: BBox4,
+        warnings: List[str],
+    ) -> List[TrafficEvent]:
+        de_task = self._data_exchange.poll(client=client, bbox=bbox, warnings=warnings)
+        em_task = self._emergency.poll(client=client, bbox=bbox, warnings=warnings)
+        de_items, em_items = await asyncio.gather(de_task, em_task)
+        return list(de_items) + list(em_items)
+
+
+# ══════════════════════════════════════════════════════════════
+# WA Incidents - WebEoc real-time road incidents / roadworks / closures
+# ══════════════════════════════════════════════════════════════
+
+_WA_INCIDENTS_BASE = (
+    "https://services2.arcgis.com/cHGEnmsJ165IBJRM/arcgis/rest/services"
+    "/WebEocFeatureLayerViewPRD/FeatureServer"
+)
+# Layer 1 – Road Incidents (points); publishExt='Yes' filter
+_WA_LAYER1_URL = (
+    f"{_WA_INCIDENTS_BASE}/1/query"
+    "?where=publishExt%3D%27Yes%27&outFields=*&f=geojson"
+)
+# Layer 2 – Roadworks (points)
+_WA_LAYER2_URL = f"{_WA_INCIDENTS_BASE}/2/query?where=1%3D1&outFields=*&f=geojson"
+# Layer 4 – Road Closures (lines)
+_WA_LAYER4_URL = f"{_WA_INCIDENTS_BASE}/4/query?where=1%3D1&outFields=*&f=geojson"
+# Layer 11 – Roads Opened With Conditions (gravel/flood-damaged roads, outback)
+_WA_LAYER11_URL = f"{_WA_INCIDENTS_BASE}/11/query?where=1%3D1&outFields=*&f=geojson"
+
+_WA_INCIDENTS_TTL = 300  # 5 minutes – live feed
+
+
+class _WaIncidentsProvider:
+    """
+    Real-time WA road incidents, roadworks, and closures from the
+    Department of Transport WebEoc ArcGIS FeatureServer.
+
+    Queries 4 layers concurrently:
+      Layer 1  – Road Incidents (points, publishExt='Yes')
+      Layer 2  – Roadworks (points)
+      Layer 4  – Road Closures (lines)
+      Layer 11 – Roads Opened With Conditions (outback gravel/flood-damaged roads)
+
+    Key fields: IncidentType, ClosureType, TrafficCondition, TrafficImpact,
+      Location, Road, EntryDate, OBJECTID
+    """
+
+    @staticmethod
+    def _bbox_param(bbox: BBox4) -> str:
+        return (
+            f"&geometry={bbox.minLng},{bbox.minLat},{bbox.maxLng},{bbox.maxLat}"
+            "&geometryType=esriGeometryEnvelope"
+            "&spatialRel=esriSpatialRelIntersects"
+            "&inSR=4326"
+        )
+
+    @staticmethod
+    def _midpoint(coords: List[List[float]]) -> List[float]:
+        """Return the midpoint of a list of [lng, lat] coordinate pairs."""
+        if not coords:
+            return [0.0, 0.0]
+        lng = sum(c[0] for c in coords) / len(coords)
+        lat = sum(c[1] for c in coords) / len(coords)
+        return [lng, lat]
+
+    def _parse_feature(
+        self,
+        feature: Dict[str, Any],
+        *,
+        layer: int,
+    ) -> Optional[TrafficEvent]:
+        if not isinstance(feature, dict):
+            return None
+
+        props = feature.get("properties") or {}
+        if not isinstance(props, dict):
+            props = {}
+
+        geom = feature.get("geometry") or None
+        geojson_geom: Optional[Dict[str, Any]] = geom if isinstance(geom, dict) else None
+
+        # Derive point geometry for bbox / midpoint
+        point_coords: Optional[List[float]] = None
+        if isinstance(geojson_geom, dict):
+            gtype = geojson_geom.get("type")
+            raw_coords = geojson_geom.get("coordinates")
+            if gtype == "Point" and isinstance(raw_coords, list) and len(raw_coords) >= 2:
+                try:
+                    point_coords = [float(raw_coords[0]), float(raw_coords[1])]
+                except (ValueError, TypeError):
+                    pass
+            elif gtype == "LineString" and isinstance(raw_coords, list) and raw_coords:
+                try:
+                    pairs = [[float(c[0]), float(c[1])] for c in raw_coords if len(c) >= 2]
+                    if pairs:
+                        point_coords = self._midpoint(pairs)
+                except (ValueError, TypeError, IndexError):
+                    pass
+
+        bb = _bbox_from_geom(geojson_geom) if geojson_geom else None
+
+        # Key fields
+        incident_type = str(props.get("IncidentType") or "").strip()
+        closure_type = str(props.get("ClosureType") or "").strip()
+        traffic_impact = str(props.get("TrafficImpact") or "").strip()
+        road = str(props.get("Road") or "").strip()
+        location = str(props.get("Location") or "").strip()
+        entry_date = props.get("EntryDate") or None
+
+        # Build description: "{Road}: {Location} — {IncidentType or ClosureType}"
+        type_label = incident_type or closure_type or ""
+        _road_loc = ": ".join(p for p in [road, location] if p)
+        description = (
+            f"{_road_loc} — {type_label}" if _road_loc and type_label
+            else _road_loc or type_label or None
+        )
+
+        # Headline
+        headline_parts: List[str] = []
+        if type_label:
+            headline_parts.append(type_label)
+        if road:
+            headline_parts.append(road)
+        if location:
+            headline_parts.append(location)
+        headline = " - ".join(headline_parts) if headline_parts else "WA road incident"
+
+        # --- Classify by mapping rules ---
+        it_lower = incident_type.lower()
+        ct_lower = closure_type.lower()
+        ti_lower = traffic_impact.lower()
+
+        typ: str
+        sev: str
+
+        if layer == 4 or "clos" in it_lower or "clos" in ct_lower:
+            typ, sev = "closure", "major"
+        elif layer == 11:
+            # Roads Opened With Conditions — passable but damaged/restricted
+            typ, sev = "hazard", "moderate"
+        elif layer == 2 or "roadwork" in it_lower:
+            typ, sev = "roadwork", "minor"
+        elif "crash" in it_lower or "accident" in it_lower:
+            typ, sev = "incident", "major"
+        elif "flood" in it_lower or "water" in it_lower:
+            typ, sev = "closure", "major"
+        elif "fire" in it_lower:
+            typ, sev = "incident", "major"
+        else:
+            typ, sev = "incident", "minor"
+
+        # TrafficImpact "delay" → minor unless already major
+        if "delay" in ti_lower and sev != "major":
+            sev = "minor"
+
+        # Stable ID: OBJECTID or hash of Road+Location+EntryDate
+        object_id = props.get("OBJECTID")
+        if object_id is not None:
+            ev_id = _stable_id(["wa_incident", str(object_id)])
+        else:
+            ev_id = _stable_id([
+                "wa_incident",
+                road[:80],
+                location[:80],
+                str(entry_date or ""),
+            ])
+
+        # Parse entry date
+        last_updated: Optional[str] = None
+        if entry_date is not None:
+            if isinstance(entry_date, (int, float)) and entry_date > 1_000_000_000:
+                try:
+                    dt = datetime.fromtimestamp(float(entry_date) / 1000, tz=timezone.utc)
+                    last_updated = dt.isoformat()
+                except Exception:
+                    pass
+            else:
+                last_updated = str(entry_date).strip() or None
+
+        return TrafficEvent(
+            id=ev_id,
+            source="wa_webeoc",
+            feed=f"layer{layer}",
+            type=typ,       # type: ignore
+            severity=sev,   # type: ignore
+            headline=headline,
+            description=description,
+            url=None,
+            last_updated=last_updated,
+            start_at=last_updated,
+            end_at=None,
+            geometry=geojson_geom,
+            bbox=bb,
+            region="wa",
+            raw=props,
+        )
+
+    async def _fetch_layer(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        layer: int,
+        bbox: BBox4,
+        warnings: List[str],
+    ) -> List[TrafficEvent]:
+        url = base_url + self._bbox_param(bbox)
+        try:
+            r = await client.get(url, headers={"User-Agent": "roam/traffic"})
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            warnings.append(f"traffic:wa_incidents:layer{layer} failed: {e}")
+            return []
+
+        items: List[TrafficEvent] = []
+        for f in (data.get("features") or []):
+            ev = self._parse_feature(f, layer=layer)
+            if ev:
+                items.append(ev)
+        return items
+
+    async def poll(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        bbox: BBox4,
+        warnings: List[str],
+    ) -> List[TrafficEvent]:
+        layer_tasks = [
+            self._fetch_layer(client, _WA_LAYER1_URL, 1, bbox, warnings),
+            self._fetch_layer(client, _WA_LAYER2_URL, 2, bbox, warnings),
+            self._fetch_layer(client, _WA_LAYER4_URL, 4, bbox, warnings),
+            self._fetch_layer(client, _WA_LAYER11_URL, 11, bbox, warnings),
+        ]
+        results = await asyncio.gather(*layer_tasks)
+        items: List[TrafficEvent] = []
+        for batch in results:
+            items.extend(batch)
+        return items
+
+
+class _WaCompositeProvider:
+    """Combines _WaTrafficProvider (Main Roads legacy) and _WaIncidentsProvider (WebEoc)."""
+
+    def __init__(self) -> None:
+        self._legacy = _WaTrafficProvider()
+        self._incidents = _WaIncidentsProvider()
+
+    async def poll(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        bbox: BBox4,
+        warnings: List[str],
+    ) -> List[TrafficEvent]:
+        legacy_task = self._legacy.poll(client=client, bbox=bbox, warnings=warnings)
+        incidents_task = self._incidents.poll(client=client, bbox=bbox, warnings=warnings)
+        legacy_items, incident_items = await asyncio.gather(legacy_task, incidents_task)
+        return list(legacy_items) + list(incident_items)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1265,9 +1743,9 @@ class _NtTrafficProvider:
 # Provider singletons
 _QLD = _QldTrafficProvider()
 _NSW = _NswTrafficProvider()
-_VIC = _VicTrafficProvider()
+_VIC = _VicCompositeProvider()
 _SA = _SaTrafficProvider()
-_WA = _WaTrafficProvider()
+_WA = _WaCompositeProvider()
 _NT = _NtTrafficProvider()
 
 # Map state codes → provider instances
@@ -1305,7 +1783,7 @@ class Traffic:
         if "act" in active_states and "nsw" not in query_states:
             query_states.append("nsw")
 
-        traffic_key = _stable_key(
+        traffic_key = stable_key(
             "traffic",
             {
                 "bbox": bbox.model_dump(),
@@ -1319,7 +1797,7 @@ class Traffic:
         if cached:
             try:
                 pack = TrafficOverlay.model_validate(cached)
-                if _is_fresh(pack.created_at, max_age_s=max_age):
+                if is_fresh(pack.created_at, max_age_s=max_age):
                     return pack
             except Exception:
                 pass

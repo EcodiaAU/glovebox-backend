@@ -10,10 +10,10 @@ import logging
 from typing import Optional
 
 import stripe as stripe_lib
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.core.auth import AuthUser, get_current_user, get_optional_user
+from app.core.auth import AuthUser, get_optional_user
 from app.core.settings import settings
 from app.core.supabase_admin import get_supabase_admin
 

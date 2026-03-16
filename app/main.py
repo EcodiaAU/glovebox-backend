@@ -5,7 +5,7 @@ import logging
 import logging.config
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -25,6 +25,7 @@ from app.services.corridor import Corridor
 from app.services.bundle import Bundle
 from app.services.places import Places
 from app.services.places_store import PlacesStore
+from app.services.rest_areas import RestAreas
 
 # ──────────────────────────────────────────────────────────────
 # Structured logging
@@ -140,6 +141,18 @@ def _register_dependencies(app: FastAPI) -> None:
     from app.api import nav as nav_api
     from app.api import bundle as bundle_api
     from app.api import places as places_api
+    from app.api import fuel as fuel_api
+    from app.api import rest_areas as rest_areas_api
+    from app.api import coverage as coverage_api
+    from app.api import wildlife as wildlife_api
+    from app.api import emergency_services as emergency_api
+    from app.api import heritage as heritage_api
+    from app.api import air_quality as aqi_api
+    from app.api import bushfire as bushfire_api
+    from app.api import speed_cameras as cameras_api
+    from app.api import toilets as toilets_api
+    from app.api import school_zones as school_zones_api
+    from app.api import roadkill as roadkill_api
 
     def provide_cache_conn() -> sqlite3.Connection:
         if _cache_conn is None:
@@ -180,4 +193,56 @@ def _register_dependencies(app: FastAPI) -> None:
     # Places
     app.dependency_overrides[places_api.get_places_service] = provide_places_service
     app.dependency_overrides[places_api.get_corridor_service] = provide_corridor_service
+    app.dependency_overrides[places_api.get_cache_conn] = provide_cache_conn
     app.dependency_overrides[bundle_api.get_places_service] = provide_places_service
+
+    # Fuel
+    app.dependency_overrides[fuel_api.get_cache_conn] = provide_cache_conn
+
+    # Rest Areas
+    def provide_rest_areas_service() -> RestAreas:
+        return RestAreas(conn=_cache_conn)
+
+    app.dependency_overrides[rest_areas_api.get_rest_areas_service] = provide_rest_areas_service
+
+    # Coverage
+    app.dependency_overrides[coverage_api.get_cache_conn] = provide_cache_conn
+
+    # Wildlife
+    app.dependency_overrides[wildlife_api.get_cache_conn] = provide_cache_conn
+
+    # Emergency Services
+    app.dependency_overrides[emergency_api.get_cache_conn] = provide_cache_conn
+
+    # Heritage
+    app.dependency_overrides[heritage_api.get_cache_conn] = provide_cache_conn
+
+    # Air Quality
+    app.dependency_overrides[aqi_api.get_cache_conn] = provide_cache_conn
+
+    # Bushfire
+    app.dependency_overrides[bushfire_api.get_cache_conn] = provide_cache_conn
+
+    # Speed Cameras
+    app.dependency_overrides[cameras_api.get_cache_conn] = provide_cache_conn
+
+    # Toilets
+    app.dependency_overrides[toilets_api.get_cache_conn] = provide_cache_conn
+
+    # School Zones
+    app.dependency_overrides[school_zones_api.get_cache_conn] = provide_cache_conn
+
+    # Roadkill
+    app.dependency_overrides[roadkill_api.get_cache_conn] = provide_cache_conn
+
+    # Presence
+    from app.api import presence as presence_api
+    app.dependency_overrides[presence_api.get_cache_conn] = provide_cache_conn
+
+    # Observations
+    from app.api import observations as observations_api
+    app.dependency_overrides[observations_api.get_cache_conn] = provide_cache_conn
+
+    # Peer Sync
+    from app.api import peer_sync as peer_sync_api
+    app.dependency_overrides[peer_sync_api.get_cache_conn] = provide_cache_conn

@@ -9,8 +9,16 @@ Sources (auto-selected by bbox → state detection):
   - VIC: Emergency Victoria incidents (JSON)
   - SA:  CFS current incidents (JSON)
   - WA:  DFES incidents + warnings (api.emergency.wa.gov.au/v1/)
+  - NT:  Emergency Announcements (roadreport.nt.gov.au/api/Announcement/GetEmergencyAnnouncements)
   - TAS: TheList ArcGIS Emergency Management (public, no auth)
   - National: DEA satellite fire hotspots (all states, CC-BY 4.0)
+  - National: RADAR roadworks/closures (federal, all states, ArcGIS FeatureServer)
+  - QLD Parks: Park closure/alert RSS (parks.qld.gov.au)
+  - NSW NPWS: National Parks park closure/alert RSS (nationalparks.nsw.gov.au)
+  - VIC Parks: Park closure/alert RSS (parks.vic.gov.au) — disabled until URL confirmed
+  - SA Parks: Park closure/alert RSS (parks.sa.gov.au) — disabled until URL confirmed
+  - NT Parks: Park closure/alert RSS (nt.gov.au) — disabled until URL confirmed
+  - TAS Parks: Park closure/alert RSS (parks.tas.gov.au) — disabled until URL confirmed
 
 Key features:
   - National coverage (all states)
@@ -24,14 +32,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 import asyncio
-import base64
+import email.utils
 import hashlib
 import json
+import logging
 import math
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -40,6 +49,7 @@ from app.core.geo_registry import states_for_bbox
 from app.core.settings import settings
 from app.core.storage import get_hazards_pack, put_hazards_pack
 from app.core.time import utc_now_iso
+from app.core.cache_utils import is_fresh, stable_key
 
 
 # ══════════════════════════════════════════════════════════════
@@ -47,12 +57,6 @@ from app.core.time import utc_now_iso
 # ══════════════════════════════════════════════════════════════
 
 BBox = Tuple[float, float, float, float]  # minLng,minLat,maxLng,maxLat
-
-
-def _stable_key(prefix: str, obj: dict) -> str:
-    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"))
-    h = hashlib.sha256((prefix + "::" + raw).encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(h).decode("utf-8").rstrip("=")
 
 
 def _stable_id(parts: List[str]) -> str:
@@ -82,15 +86,6 @@ def _parse_iso_to_epoch(s: Optional[str]) -> Optional[float]:
         return dt.timestamp()
     except Exception:
         return None
-
-
-def _is_fresh(created_at: Optional[str], *, max_age_s: int) -> bool:
-    if max_age_s <= 0:
-        return False
-    ts = _parse_iso_to_epoch(created_at)
-    if ts is None:
-        return False
-    return (time.time() - ts) <= float(max_age_s)
 
 
 def _is_expired(end_str: Optional[str]) -> bool:
@@ -1562,6 +1557,90 @@ def _parse_tas_thelist_json(json_text: str) -> List[HazardEvent]:
 
 
 # ══════════════════════════════════════════════════════════════
+# NT: Emergency Announcements (roadreport.nt.gov.au)
+# ══════════════════════════════════════════════════════════════
+
+def _parse_nt_emergency_announcements(json_text: str) -> List[HazardEvent]:
+    """
+    Parse NT Road Report emergency announcements.
+
+    Response: {response: [{id, title, content, emergency: bool,
+                           lastUpdatedTime, postedDate}], success: bool}
+
+    These are text-only, state-wide alerts about major events such as
+    "Major Flooding - Katherine and Darwin Region". No geometry is provided
+    so they are treated as non-spatial (shown when bbox is large enough).
+    """
+    out: List[HazardEvent] = []
+    try:
+        data = json.loads(json_text)
+    except Exception:
+        return out
+
+    if not isinstance(data, dict) or not data.get("success"):
+        return out
+
+    announcements = data.get("response") or []
+    if not isinstance(announcements, list):
+        return out
+
+    for ann in announcements:
+        if not isinstance(ann, dict):
+            continue
+
+        ann_id = str(ann.get("id") or "").strip()
+        title = str(ann.get("title") or "").strip()
+        content = str(ann.get("content") or "").strip()
+        is_emergency = bool(ann.get("emergency") or False)
+        last_updated_raw = ann.get("lastUpdatedTime") or ann.get("postedDate") or None
+
+        if not title:
+            continue
+
+        kind = _kind_from_text(title, content)
+        sev: str
+        cap_sev: str
+        cap_urg: str
+        if is_emergency:
+            sev = "high"
+            cap_sev, cap_urg = "extreme", "immediate"
+        else:
+            sev = _severity_from_text(title, content)
+            cap_sev, cap_urg = "moderate", "expected"
+
+        # Parse ISO timestamp
+        issued_at: Optional[str] = None
+        if last_updated_raw:
+            issued_at = str(last_updated_raw)
+
+        hid = _stable_id(["nt_emergency_ann", ann_id or title[:160]])
+
+        out.append(
+            HazardEvent(
+                id=hid,
+                source="nt_emergency_ann",
+                kind=kind,           # type: ignore
+                severity=sev,        # type: ignore
+                urgency=_normalise_cap_urgency(cap_urg),    # type: ignore
+                certainty="observed",                        # type: ignore
+                effective_priority=_compute_effective_priority(cap_sev, cap_urg, "observed"),
+                title=title,
+                description=(content or None),
+                url="https://roadreport.nt.gov.au/",
+                issued_at=issued_at,
+                start_at=issued_at,
+                end_at=None,
+                geometry=None,
+                bbox=None,
+                region="nt",
+                raw=ann,
+            )
+        )
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
 # Source registry - maps states to their feeds
 # ══════════════════════════════════════════════════════════════
 
@@ -1626,6 +1705,12 @@ def _json_feeds_for_state(state: str) -> List[Tuple[str, str, str]]:
                 elif fname == "warnings":
                     feeds.append(("wa_dfes_warnings", f"{base}/warnings", "wa_dfes_warnings"))
 
+    elif state == "nt":
+        if settings.nt_traffic_enabled:
+            url = getattr(settings, "nt_emergency_announcements_url", "") or ""
+            if url:
+                feeds.append(("nt_emergency_ann", url, "nt_emergency_ann"))
+
     elif state == "tas":
         if getattr(settings, "tas_hazards_enabled", False):
             url = getattr(settings, "tas_thelist_url", "") or ""
@@ -1648,7 +1733,345 @@ _JSON_PARSERS: Dict[str, Any] = {
     "wa_dfes_incidents": lambda text: _parse_wa_dfes_incidents(text),
     "wa_dfes_warnings": lambda text: _parse_wa_dfes_warnings(text),
     "tas_thelist": lambda text: _parse_tas_thelist_json(text),
+    "nt_emergency_ann": lambda text: _parse_nt_emergency_announcements(text),
 }
+
+
+# ══════════════════════════════════════════════════════════════
+# National: RADAR roadworks / closures (federal ArcGIS FeatureServer)
+# ══════════════════════════════════════════════════════════════
+
+_RADAR_KIND_MAP: Dict[str, str] = {
+    "flood": "flood",
+    "crash": "road_crash",
+    "fire": "fire",
+    "planned roadworks": "road_closure",
+    "unplanned roadworks": "road_closure",
+}
+
+_RADAR_SEVERITY_MAP: Dict[str, str] = {
+    "flood": "extreme",
+    "crash": "severe",
+    "fire": "severe",
+}
+
+
+def _radar_kind(updated_category: str) -> str:
+    return _RADAR_KIND_MAP.get(updated_category.lower(), "road_closure")
+
+
+def _radar_severity(category: str) -> str:
+    return _RADAR_SEVERITY_MAP.get(category.lower(), "moderate")
+
+
+def _epoch_ms_to_iso(ms: Any) -> Optional[str]:
+    if ms is None:
+        return None
+    try:
+        val = float(ms)
+        if val > 0:
+            return datetime.fromtimestamp(val / 1000, tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_radar_roadworks(
+    client: httpx.AsyncClient,
+    bbox: BBox4,
+) -> List[HazardEvent]:
+    """Fetch active RADAR roadworks/closures from the federal ArcGIS FeatureServer."""
+    if not getattr(settings, "radar_roadworks_enabled", True):
+        return []
+    url = getattr(settings, "radar_roadworks_url", "") or ""
+    if not url:
+        return []
+
+    envelope = json.dumps({
+        "xmin": bbox.minLng,
+        "ymin": bbox.minLat,
+        "xmax": bbox.maxLng,
+        "ymax": bbox.maxLat,
+        "spatialReference": {"wkid": 4326},
+    })
+    params = {
+        "f": "json",
+        "where": "status='Active' AND (to_date >= CURRENT_TIMESTAMP OR to_date IS NULL)",
+        "geometry": envelope,
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outFields": (
+            "street_name,side_street,category,updated_category,"
+            "state,from_date,to_date,description,location"
+        ),
+        "outSR": "4326",
+        "returnGeometry": "true",
+        "resultRecordCount": "200",
+    }
+
+    out: List[HazardEvent] = []
+    try:
+        r = await client.get(url, params=params, headers={"User-Agent": "roam/hazards"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("hazards:radar_roadworks failed: %s", e)
+        return []
+
+    features = data.get("features") or []
+    for f in features:
+        if not isinstance(f, dict):
+            continue
+        attrs = f.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            continue
+
+        street_name = str(attrs.get("street_name") or "").strip()
+        category = str(attrs.get("category") or "").strip()
+        updated_category = str(attrs.get("updated_category") or "").strip()
+        state_val = str(attrs.get("state") or "").strip()
+        description = str(attrs.get("description") or "").strip() or None
+        from_date = attrs.get("from_date")
+        to_date = attrs.get("to_date")
+
+        # Title
+        uc = updated_category or category or "Roadworks"
+        if street_name:
+            title = f"{uc}: {street_name}"
+        elif description:
+            title = description[:120]
+        else:
+            title = uc
+
+        kind = _radar_kind(updated_category)
+        sev = _radar_severity(category)
+
+        # Geometry: ArcGIS {x, y} point from location field, or feature geometry
+        geom: Optional[Dict[str, Any]] = None
+        bbox_out: Optional[List[float]] = None
+
+        # Try location attribute first ({x: lng, y: lat})
+        loc = attrs.get("location")
+        if isinstance(loc, dict):
+            lx = _safe_float(loc.get("x"))
+            ly = _safe_float(loc.get("y"))
+            if lx is not None and ly is not None:
+                geom = {"type": "Point", "coordinates": [lx, ly]}
+                bbox_out = [lx, ly, lx, ly]
+
+        # Fallback: feature-level geometry (ArcGIS point or rings)
+        if not geom:
+            raw_geom = f.get("geometry") or {}
+            if isinstance(raw_geom, dict):
+                gx = _safe_float(raw_geom.get("x"))
+                gy = _safe_float(raw_geom.get("y"))
+                if gx is not None and gy is not None:
+                    geom = {"type": "Point", "coordinates": [gx, gy]}
+                    bbox_out = [gx, gy, gx, gy]
+
+        start_at = _epoch_ms_to_iso(from_date)
+        end_at = _epoch_ms_to_iso(to_date)
+
+        # Prune expired
+        if end_at and _is_expired(end_at):
+            continue
+
+        hid = _stable_id([
+            "radar_roadworks",
+            title[:160],
+            state_val,
+            str(from_date or ""),
+        ])
+
+        out.append(
+            HazardEvent(
+                id=hid,
+                source="radar_national",
+                kind=kind,            # type: ignore
+                severity=sev,         # type: ignore
+                urgency="expected",   # type: ignore
+                certainty="observed", # type: ignore
+                effective_priority=_compute_effective_priority(
+                    "extreme" if kind == "flood" else ("severe" if kind in ("road_crash", "fire") else "moderate"),
+                    "expected",
+                    "observed",
+                ),
+                title=title,
+                description=description,
+                url=None,
+                issued_at=None,
+                start_at=start_at,
+                end_at=end_at,
+                geometry=geom,
+                bbox=bbox_out,
+                region=state_val.lower() if state_val else None,
+                raw=attrs,
+            )
+        )
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
+# Park Alerts: QLD Parks + NSW NPWS RSS feeds
+# ══════════════════════════════════════════════════════════════
+
+_log = logging.getLogger(__name__)
+
+# Approximate latitude bounds for state overlap checks (minLat, maxLat)
+_STATE_LAT_BOUNDS: Dict[str, Tuple[float, float]] = {
+    "qld": (-29.0, -10.0),
+    "nsw": (-37.5, -28.0),
+    "vic": (-39.2, -34.0),
+    "sa":  (-38.1, -26.0),
+    "nt":  (-26.0, -11.0),
+    "tas": (-43.7, -40.5),
+    "wa":  (-35.0, -14.0),
+}
+
+_PARK_ALERT_MAX_AGE_DAYS = 30
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _parse_park_rss(xml_text: str, source: str) -> List[HazardEvent]:
+    """Parse a park-alerts RSS 2.0 feed into HazardEvent list."""
+    out: List[HazardEvent] = []
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=_PARK_ALERT_MAX_AGE_DAYS)
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return out
+
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip() or None
+        raw_desc = (item.findtext("description") or "").strip()
+        desc = _strip_html(raw_desc) or None
+        pub_raw = (item.findtext("pubDate") or "").strip() or None
+
+        if not title and not desc:
+            continue
+
+        # Parse pubDate; skip if older than 30 days
+        published_at: Optional[str] = None
+        if pub_raw:
+            try:
+                dt = email.utils.parsedate_to_datetime(pub_raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < cutoff:
+                    continue
+                published_at = dt.isoformat()
+            except Exception:
+                pass
+
+        # Classify type
+        hay = f"{title} {desc or ''}".lower()
+        if any(kw in hay for kw in ("closed", "closure", "access unavailable")):
+            kind = "road_closure"
+        else:
+            kind = "unknown"
+
+        # Severity
+        sev = "medium" if "closed" in title.lower() else "low"
+
+        hid = _stable_id([source, title[:160], (link or "")[:160], (published_at or pub_raw or "")[:80]])
+
+        out.append(
+            HazardEvent(
+                id=hid,
+                source=source,
+                kind=kind,            # type: ignore
+                severity=sev,         # type: ignore
+                urgency="expected",   # type: ignore
+                certainty="observed", # type: ignore
+                effective_priority=_compute_effective_priority(sev, "expected", "observed"),
+                title=title or "Park Alert",
+                description=desc,
+                url=link,
+                issued_at=published_at,
+                start_at=published_at,
+                end_at=None,
+                geometry=None,
+                bbox=None,
+                region=source.split("_")[0],  # "qld" or "nsw"
+                raw={},
+            )
+        )
+
+    return out
+
+
+def _bbox_overlaps_state(bbox: BBox4, state: str) -> bool:
+    """Return True if bbox latitudes overlap the approximate lat band for state."""
+    bounds = _STATE_LAT_BOUNDS.get(state)
+    if bounds is None:
+        return False
+    state_min_lat, state_max_lat = bounds
+    return not (bbox.maxLat < state_min_lat or bbox.minLat > state_max_lat)
+
+
+async def _fetch_park_alerts(client: httpx.AsyncClient, bbox: BBox4) -> List[HazardEvent]:
+    """Fetch park alert RSS feeds for all enabled states concurrently."""
+    sources: List[Tuple[str, str]] = []  # (source_label, url)
+
+    if settings.parks_qld_alerts_enabled and _bbox_overlaps_state(bbox, "qld"):
+        url = settings.parks_qld_alerts_url or ""
+        if url:
+            sources.append(("qld_parks", url))
+
+    if settings.parks_nsw_alerts_enabled and _bbox_overlaps_state(bbox, "nsw"):
+        url = settings.parks_nsw_alerts_url or ""
+        if url:
+            sources.append(("nsw_npws", url))
+
+    if settings.parks_vic_alerts_enabled and _bbox_overlaps_state(bbox, "vic"):
+        url = settings.parks_vic_alerts_url or ""
+        if url:
+            sources.append(("vic_parks", url))
+
+    if settings.parks_sa_alerts_enabled and _bbox_overlaps_state(bbox, "sa"):
+        url = settings.parks_sa_alerts_url or ""
+        if url:
+            sources.append(("sa_parks", url))
+
+    if settings.parks_nt_alerts_enabled and _bbox_overlaps_state(bbox, "nt"):
+        url = settings.parks_nt_alerts_url or ""
+        if url:
+            sources.append(("nt_parks", url))
+
+    if settings.parks_tas_alerts_enabled and _bbox_overlaps_state(bbox, "tas"):
+        url = settings.parks_tas_alerts_url or ""
+        if url:
+            sources.append(("tas_parks", url))
+
+    if not sources:
+        return []
+
+    async def _fetch_one(source: str, url: str) -> List[HazardEvent]:
+        try:
+            r = await client.get(url, headers={"User-Agent": "roam/hazards"})
+            r.raise_for_status()
+            ct = r.headers.get("content-type", "")
+            text = r.text
+            # Reject HTML responses silently - the URL is misconfigured
+            if "html" in ct.lower() or (text.lstrip()[:1] not in ("<", "")):
+                _log.warning("hazards:park_alerts:%s returned non-RSS content (content-type=%s)", source, ct)
+                return []
+            return _parse_park_rss(text, source)
+        except Exception as e:
+            _log.warning("hazards:park_alerts:%s failed: %s", source, e)
+            return []
+
+    results = await asyncio.gather(*[_fetch_one(src, u) for src, u in sources])
+    out: List[HazardEvent] = []
+    for batch in results:
+        out.extend(batch)
+    return out
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1678,7 +2101,7 @@ class Hazards:
             active_states.append("nsw")
             active_states.sort()
 
-        hazards_key = _stable_key(
+        hazards_key = stable_key(
             "hazards",
             {
                 "bbox": bbox.model_dump(),
@@ -1692,7 +2115,7 @@ class Hazards:
         if cached:
             try:
                 pack = HazardOverlay.model_validate(cached)
-                if _is_fresh(pack.created_at, max_age_s=max_age):
+                if is_fresh(pack.created_at, max_age_s=max_age):
                     return pack
             except Exception:
                 pass
@@ -1787,7 +2210,7 @@ class Hazards:
                     warnings_out.append(f"hazards:dea_hotspots failed: {e}")
                     return []
 
-            # Collect every coroutine for all states + DEA into one gather call.
+            # Collect every coroutine for all states + DEA + RADAR + park alerts into one gather call.
             coros = []
             for state in active_states:
                 rss_url = _bom_rss_url_for_state(state)
@@ -1798,6 +2221,8 @@ class Hazards:
                 for json_name, json_url, parser_key in _json_feeds_for_state(state):
                     coros.append(_fetch_json_feed(json_name, json_url, parser_key, state))
             coros.append(_fetch_dea())
+            coros.append(_fetch_radar_roadworks(client, bbox))
+            coros.append(_fetch_park_alerts(client, bbox))
 
             all_results = await asyncio.gather(*coros)
             for batch in all_results:
@@ -1811,6 +2236,17 @@ class Hazards:
         provider_str = "+".join(active_states) if dedup else "empty"
         if getattr(settings, "dea_hotspots_enabled", False):
             provider_str += "+dea"
+        if getattr(settings, "radar_roadworks_enabled", True):
+            provider_str += "+radar"
+        if any([
+            settings.parks_qld_alerts_enabled,
+            settings.parks_nsw_alerts_enabled,
+            settings.parks_vic_alerts_enabled,
+            settings.parks_sa_alerts_enabled,
+            settings.parks_nt_alerts_enabled,
+            settings.parks_tas_alerts_enabled,
+        ]):
+            provider_str += "+parks"
 
         pack = HazardOverlay(
             hazards_key=hazards_key,

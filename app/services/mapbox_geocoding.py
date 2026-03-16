@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +20,7 @@ import httpx
 
 from app.core.contracts import NavCoord, PlaceItem, PlacesPack, PlacesRequest
 from app.core.settings import settings
+from app.core.storage import get_geocode_cache, put_geocode_cache
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +161,11 @@ class MapboxGeocoding:
 
     BASE_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
 
-    def __init__(self) -> None:
+    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
         self.token: str = settings.mapbox_token
         self.country: str = settings.mapbox_country
+        self.conn = conn
+        self.cache_ttl_s: int = settings.mapbox_geocode_cache_seconds
         if not self.token:
             raise RuntimeError(
                 "ROAM_MAPBOX_TOKEN is not set. "
@@ -209,6 +213,20 @@ class MapboxGeocoding:
             )
 
         limit = max(1, min(limit, 10))  # Mapbox hard-caps at 10
+
+        # ── Check cache ──────────────────────────────────────────
+        cache_key = _make_places_key(query, proximity, limit)
+        if self.conn is not None:
+            cached = get_geocode_cache(self.conn, cache_key)
+            if cached:
+                age_s = (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(cached["created_at"])
+                ).total_seconds()
+                if age_s < self.cache_ttl_s:
+                    logger.info("mapbox_geocode CACHE HIT key=%s age=%.0fs", cache_key, age_s)
+                    return PlacesPack.model_validate(cached["pack"])
+                logger.info("mapbox_geocode CACHE EXPIRED key=%s age=%.0fs", cache_key, age_s)
 
         params: dict[str, str] = {
             "access_token": self.token,
@@ -259,12 +277,11 @@ class MapboxGeocoding:
             if item:
                 items.append(item)
 
-        places_key = _make_places_key(query, proximity, limit)
+        logger.info("mapbox_geocode results=%d key=%s", len(items), cache_key)
 
-        logger.info("mapbox_geocode results=%d key=%s", len(items), places_key)
-
-        return PlacesPack(
-            places_key=places_key,
+        now_iso = datetime.now(timezone.utc).isoformat()
+        pack = PlacesPack(
+            places_key=cache_key,
             req=PlacesRequest(
                 query=query,
                 center=NavCoord(lat=proximity[0], lng=proximity[1]) if proximity else None,
@@ -272,6 +289,21 @@ class MapboxGeocoding:
             ),
             items=items,
             provider="mapbox_geocoding_v5",
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=now_iso,
             algo_version=settings.places_algo_version,
         )
+
+        # ── Write to cache ───────────────────────────────────────
+        if self.conn is not None:
+            try:
+                put_geocode_cache(
+                    self.conn,
+                    cache_key=cache_key,
+                    created_at=now_iso,
+                    pack=pack.model_dump(),
+                )
+                logger.info("mapbox_geocode CACHED key=%s", cache_key)
+            except Exception as exc:
+                logger.warning("mapbox_geocode cache write failed: %s", exc)
+
+        return pack

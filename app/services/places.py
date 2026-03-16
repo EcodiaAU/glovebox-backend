@@ -212,13 +212,17 @@ _FALLBACK_FILTERS: Dict[str, List[str]] = {
     # ── ESSENTIALS & SAFETY ──────────────────────────────────
     "fuel": [
         '["amenity"="fuel"]',
+        '["amenity"="fuel"]["fuel:diesel"="yes"]',
+        '["amenity"="fuel"]["fuel:lpg"="yes"]',
     ],
     "ev_charging": [
         '["amenity"="charging_station"]',
     ],
     "rest_area": [
         '["highway"="rest_area"]',
+        '["highway"="services"]',
         '["amenity"="rest_area"]',
+        '["highway"="layby"]',
     ],
     "toilet": [
         '["amenity"="toilets"]',
@@ -227,21 +231,39 @@ _FALLBACK_FILTERS: Dict[str, List[str]] = {
         '["amenity"="drinking_water"]',
         '["man_made"="water_well"]',
         '["man_made"="water_tap"]',
+        '["amenity"="water_point"]',
+        '["natural"="spring"]["drinking_water"="yes"]',
     ],
     "dump_point": [
         '["amenity"="sanitary_dump_station"]',
-        '["amenity"="waste_disposal"]["waste"="chemical"]',
+        '["amenity"="waste_disposal"]["waste"~"grey_water|black_water"]',
+    ],
+    "water_fill": [
+        '["amenity"="water_point"]',
+        '["amenity"="drinking_water"]',
+    ],
+    "shower": [
+        '["amenity"="shower"]',
+        '["shower"="yes"]',
     ],
     "mechanic": [
         '["shop"="car_repair"]',
         '["amenity"="car_repair"]',
         '["shop"="tyres"]',
+        '["amenity"="car_wash"]',
+        '["shop"="car_repair"]["service"~"tyre|tire|mechanical"]',
     ],
     "hospital": [
         '["amenity"="hospital"]',
+        '["amenity"="clinic"]',
     ],
     "pharmacy": [
         '["amenity"="pharmacy"]',
+    ],
+    "emergency_phone": [
+        '["amenity"="emergency_phone"]',
+        '["emergency"="phone"]',
+        '["amenity"="ranger_station"]',
     ],
 
     # ── SUPPLIES ──────────────────────────────────────────────
@@ -286,8 +308,27 @@ _FALLBACK_FILTERS: Dict[str, List[str]] = {
     "camp": [
         '["tourism"="camp_site"]',
         '["tourism"="caravan_site"]',
+        '["tourism"="caravan_park"]',
+        '["tourism"="holiday_park"]',
         '["tourism"="camp_pitch"]',
         '["tourism"="alpine_hut"]',
+        '["amenity"="camping"]',
+        '["landuse"="camping"]',
+        '["camping"="yes"]',
+        '["leisure"="holiday_park"]',
+        '["brand"~"Big4|BIG4|Top Tourist|Discovery Parks|G\'Day Parks"]',
+        '["highway"="rest_area"]["camping"="yes"]',
+        '["amenity"="parking"]["camping"="yes"]',
+        # Free / low-cost specific
+        '["tourism"="camp_site"]["fee"="no"]',
+        '["tourism"="caravan_site"]["fee"="no"]',
+        # Informal bush camping (parking areas used as camping)
+        '["amenity"="parking"]["tourism"="camp_site"]',
+        # Showgrounds / recreation grounds
+        '["leisure"="recreation_ground"]["camping"="yes"]',
+        '["landuse"="recreation_ground"]["name"~"[Ss]howground"]',
+        # Station / farm stays
+        '["tourism"="camp_site"]["operator:type"~"farm|station|pastoral"]',
     ],
     "hotel": [
         '["tourism"="hotel"]',
@@ -392,6 +433,7 @@ _FALLBACK_FILTERS: Dict[str, List[str]] = {
     "visitor_info": [
         '["tourism"="information"]["information"="office"]',
         '["tourism"="information"]["information"="visitor_centre"]',
+        '["amenity"="ranger_station"]',
     ],
     "museum": [
         '["tourism"="museum"]',
@@ -496,20 +538,27 @@ def _infer_category(tags: Dict[str, Any]) -> PlaceCategory:
         return "fuel"
     if a == "charging_station":
         return "ev_charging"
-    if hw == "rest_area" or a == "rest_area":
+    # rest_area: camping=yes on a rest_area → camp beats rest_area
+    if (hw in ("rest_area", "services", "layby") or a == "rest_area") and tags.get("camping") != "yes":
         return "rest_area"
     if a == "toilets":
         return "toilet"
-    if a == "drinking_water" or mm in ("water_well", "water_tap"):
+    if a == "shower" or tags.get("shower") == "yes":
+        return "shower"
+    if a == "water_point":
+        return "water_fill"
+    if a in ("drinking_water",) or mm in ("water_well", "water_tap") or (n == "spring" and tags.get("drinking_water") == "yes"):
         return "water"
-    if a == "sanitary_dump_station":
+    if a == "sanitary_dump_station" or (a == "waste_disposal" and tags.get("waste", "") in ("grey_water", "black_water")):
         return "dump_point"
-    if s == "car_repair" or a == "car_repair" or s == "tyres":
+    if s == "car_repair" or a in ("car_repair", "car_wash") or s == "tyres":
         return "mechanic"
-    if a == "hospital":
+    if a in ("hospital", "clinic"):
         return "hospital"
     if a == "pharmacy":
         return "pharmacy"
+    if a in ("emergency_phone", "ranger_station") or tags.get("emergency") == "phone":
+        return "emergency_phone"
 
     # ── SUPPLIES ──────────────────────────────────────────────
 
@@ -537,7 +586,13 @@ def _infer_category(tags: Dict[str, Any]) -> PlaceCategory:
 
     # ── ACCOMMODATION ─────────────────────────────────────────
 
-    if t in ("camp_site", "caravan_site", "camp_pitch", "alpine_hut"):
+    if t in ("camp_site", "caravan_site", "caravan_park", "holiday_park", "camp_pitch", "alpine_hut"):
+        return "camp"
+    if le == "holiday_park":
+        return "camp"
+    if a == "camping" or tags.get("landuse") == "camping" or tags.get("camping") == "yes":
+        return "camp"
+    if tags.get("brand") and any(b in tags["brand"] for b in ("Big4", "BIG4", "Top Tourist", "Discovery Parks", "G'Day Parks")):
         return "camp"
     if t == "motel":
         return "motel"
@@ -643,9 +698,12 @@ _CATEGORY_LABELS: Dict[str, str] = {
     "toilet": "Public Toilet",
     "water": "Drinking Water",
     "dump_point": "Dump Point",
+    "water_fill": "Water Fill",
+    "shower": "Public Shower",
     "mechanic": "Mechanic",
     "hospital": "Hospital",
     "pharmacy": "Pharmacy",
+    "emergency_phone": "Emergency Phone",
     "grocery": "Grocery",
     "town": "Town",
     "atm": "ATM",
@@ -718,14 +776,23 @@ def _synthetic_name(
         elif tags.get("man_made") == "water_tap":
             base = "Water Tap"
     elif category == "camp":
-        if tags.get("tourism") == "caravan_site":
+        t_val = tags.get("tourism", "")
+        le_val = tags.get("leisure", "")
+        if t_val in ("caravan_site", "caravan_park") or le_val == "holiday_park" or t_val == "holiday_park":
             base = "Caravan Park"
-        elif tags.get("tourism") == "camp_pitch":
+        elif t_val == "camp_pitch":
             base = "Camp Pitch"
-        elif tags.get("tourism") == "alpine_hut":
+        elif t_val == "alpine_hut":
             base = "Alpine Hut"
+        elif tags.get("amenity") == "camping" or tags.get("landuse") == "camping":
+            base = "Camping Area"
         if tags.get("fee") == "no":
             base = f"Free {base}"
+    elif category == "emergency_phone":
+        if tags.get("amenity") == "ranger_station":
+            base = "Ranger Station"
+        elif tags.get("amenity") == "emergency_phone" or tags.get("emergency") == "phone":
+            base = "Emergency Phone"
     elif category == "hiking":
         if tags.get("route") in ("hiking", "foot"):
             base = "Walking Trail"
@@ -768,6 +835,439 @@ def _synthetic_name(
         return base
 
 
+def _enrich_camp_tags(tags: Dict[str, Any], extra: Dict[str, Any]) -> None:
+    """Map OSM camp tags → typed PlaceExtra camping fields.
+
+    Defensive: unknown / inconsistent values are silently omitted.
+    Only sets a field when we have a confident positive signal.
+    """
+    import re
+
+    # ── Site types & configuration ────────────────────────────
+
+    # Pets / dogs — normalised to "yes" | "leashed" | "no"
+    dog = tags.get("dog") or tags.get("dogs") or tags.get("pets")
+    if dog in ("yes",):
+        extra["pets_allowed"] = "yes"
+    elif dog in ("leashed", "on_lead", "on lead"):
+        extra["pets_allowed"] = "leashed"
+    elif dog == "no":
+        extra["pets_allowed"] = "no"
+
+    # Open fires
+    openfire = tags.get("openfire") or tags.get("open_fire") or tags.get("campfire")
+    if openfire == "yes":
+        extra["fires_allowed"] = True
+    elif openfire in ("seasonal", "permitted_in_season"):
+        extra["fires_allowed"] = "seasonal"
+    elif openfire == "no":
+        extra["fires_allowed"] = False
+
+    # Generators
+    generator = tags.get("generator") or tags.get("generators")
+    if generator == "yes":
+        extra["generators_allowed"] = True
+    elif generator in ("hours_only", "limited_hours"):
+        extra["generators_allowed"] = "hours_only"
+    elif generator == "no":
+        extra["generators_allowed"] = False
+
+    # Vehicle type acceptance
+    if tags.get("caravans") == "yes":
+        extra["caravans"] = True
+    elif tags.get("caravans") == "no":
+        extra["caravans"] = False
+    # caravan_site tourism type implies caravans accepted
+    if tags.get("tourism") == "caravan_site" and "caravans" not in extra:
+        extra["caravans"] = True
+
+    if tags.get("motorhome") == "yes" or tags.get("motorhomes") == "yes":
+        extra["motorhomes"] = True
+    elif tags.get("motorhome") == "no" or tags.get("motorhomes") == "no":
+        extra["motorhomes"] = False
+
+    if tags.get("tents") == "yes":
+        extra["tents"] = True
+    elif tags.get("tents") == "no":
+        extra["tents"] = False
+
+    # Max vehicle / rig length
+    maxlength = tags.get("maxlength") or tags.get("max_length")
+    if maxlength:
+        try:
+            extra["max_vehicle_length_m"] = float(str(maxlength).replace("m", "").strip())
+        except (ValueError, TypeError):
+            pass
+
+    # Number of sites
+    capacity_raw = tags.get("capacity") or tags.get("sites")
+    if capacity_raw:
+        try:
+            extra["num_sites"] = int(str(capacity_raw).strip())
+        except (ValueError, TypeError):
+            pass
+
+    # Bookable / reservations
+    booking = tags.get("booking") or tags.get("reservations")
+    if booking in ("yes", "required", "recommended"):
+        extra["bookable"] = True
+    elif booking == "no":
+        extra["bookable"] = False
+
+    # ── Facilities ────────────────────────────────────────────
+
+    shower = tags.get("shower") or tags.get("showers")
+    if shower in ("yes", "hot", "cold", "solar", "fee"):
+        extra["has_showers"] = True
+    elif shower == "no":
+        extra["has_showers"] = False
+
+    dump = tags.get("sanitary_dump_station") or tags.get("dump_station") or tags.get("dump_point")
+    if dump in ("yes", "public", "customers"):
+        extra["has_dump_point"] = True
+    elif dump == "no":
+        extra["has_dump_point"] = False
+
+    bbq = tags.get("bbq") or tags.get("bbqs")
+    if bbq in ("yes", "charcoal", "electric", "gas"):
+        extra["has_bbq"] = True
+    elif bbq == "no":
+        extra["has_bbq"] = False
+
+    laundry = tags.get("laundry") or tags.get("washing_machine")
+    if laundry in ("yes", "coin", "token"):
+        extra["has_laundry"] = True
+    elif laundry == "no":
+        extra["has_laundry"] = False
+
+    kitchen = tags.get("kitchen") or tags.get("communal_kitchen")
+    if kitchen == "yes":
+        extra["has_kitchen"] = True
+    elif kitchen == "no":
+        extra["has_kitchen"] = False
+
+    wifi = tags.get("internet_access") or tags.get("wifi")
+    if wifi in ("yes", "wlan", "wifi", "fee"):
+        extra["has_wifi"] = True
+    elif wifi == "no":
+        extra["has_wifi"] = False
+
+    if tags.get("playground") in ("yes", "designated"):
+        extra["has_playground"] = True
+
+    if tags.get("swimming") == "yes":
+        extra["has_swimming"] = True
+
+    # Phone reception (critical for outback)
+    reception = tags.get("reception:mobile_phone") or tags.get("mobile_signal")
+    if reception in ("yes", "good", "excellent"):
+        extra["has_phone_reception"] = True
+    elif reception in ("no", "none", "poor"):
+        extra["has_phone_reception"] = False
+
+    # Per-carrier reception
+    carriers: list = []
+    for carrier, tag_key in [("telstra", "reception:telstra"), ("optus", "reception:optus"),
+                               ("vodafone", "reception:vodafone"), ("tpg", "reception:tpg")]:
+        val = tags.get(tag_key)
+        if val in ("yes", "good", "excellent"):
+            carriers.append(carrier)
+    if carriers:
+        extra["reception_carriers"] = carriers
+        if "has_phone_reception" not in extra:
+            extra["has_phone_reception"] = True
+
+    # ── Camping style ─────────────────────────────────────────
+
+    tourism_type = tags.get("tourism", "")
+    if "camp_type" not in extra:
+        operator = (tags.get("operator") or "").lower()
+        operator_type = (tags.get("operator:type") or "").lower()
+        name_lower = (tags.get("name") or "").lower()
+        access = tags.get("access", "")
+        fee = tags.get("fee", "")
+        charge_raw = tags.get("charge") or tags.get("fee:amount") or ""
+        leisure = tags.get("leisure", "")
+        landuse = tags.get("landuse", "")
+
+        # Parks authority heuristic — national/state parks generally charge
+        _PARKS_AUTHORITIES = (
+            "npws", "parks victoria", "parks vic", "qpws", "dbca",
+            "parks sa", "nt parks", "pws",
+        )
+        operator_is_parks_authority = any(p in operator for p in _PARKS_AUTHORITIES)
+        extra["operator_is_parks_authority"] = operator_is_parks_authority
+
+        # Normalise fee signal: fee=no / fee=0 both mean free
+        fee_is_free = fee in ("no", "0")
+        fee_is_set = fee not in ("", "no", "0")  # an explicit non-free fee tag
+
+        # Informal / bush camp override — takes priority over operator heuristic
+        if tags.get("informal") == "yes":
+            if not fee_is_set:
+                extra["camp_type"] = "bush"
+                extra["free"] = True
+            else:
+                extra["camp_type"] = "bush"
+        # Backcountry tag
+        elif tags.get("backcountry") == "yes":
+            extra["camp_type"] = "backcountry"
+            if not fee_is_set:
+                extra["free"] = True
+        # Nature reserve + camping=yes → likely free/bush camp
+        elif leisure == "nature_reserve" and tags.get("camping") == "yes":
+            extra["camp_type"] = "bush"
+            if not fee_is_set:
+                extra["free"] = True
+        # Showground detection
+        elif (
+            leisure == "showground"
+            or leisure == "recreation_ground"
+            or landuse == "recreation_ground"
+            or "showground" in name_lower
+            or "show ground" in name_lower
+        ):
+            extra["camp_type"] = "showground"
+        # Station stay
+        elif (
+            "station" in operator
+            or "pastoral" in operator
+            or operator_type in ("farm", "station", "pastoral")
+            or "station stay" in name_lower
+            or "station camp" in name_lower
+        ):
+            extra["camp_type"] = "station_stay"
+        # Farm stay
+        elif (
+            "farm" in operator_type
+            or "farm stay" in name_lower
+            or "farmstay" in name_lower
+        ):
+            extra["camp_type"] = "farm_stay"
+        # Bush camping (informal, track-side, dispersed)
+        elif (
+            tags.get("camp_type") in ("basic", "dispersed", "backcountry", "wild")
+            or "bush camp" in name_lower
+            or "bush camping" in name_lower
+            or (access in ("", "yes", "permissive") and not operator and fee in ("", "no", "0"))
+        ) and tourism_type in ("camp_site", "") and tags.get("amenity") != "camp_site":
+            # Distinguish truly free from commercial-looking
+            if fee_is_free or not operator:
+                extra["camp_type"] = (
+                    "bush"
+                    if tags.get("camp_type") in ("basic", "dispersed", "backcountry", "wild")
+                    else "free"
+                )
+        # Low cost: fee exists but charge is under $15
+        elif fee_is_set and charge_raw:
+            try:
+                import re as _re
+                m = _re.search(r"\$?\s*(\d+(?:\.\d+)?)", str(charge_raw))
+                if m and float(m.group(1)) < 15:
+                    extra["camp_type"] = "low_cost"
+                else:
+                    extra["camp_type"] = "commercial"
+            except (ValueError, TypeError):
+                extra["camp_type"] = "commercial"
+        elif tourism_type in ("caravan_site", "caravan_park"):
+            extra["camp_type"] = "caravan_park"
+        elif tourism_type in ("holiday_park",) or tags.get("leisure") == "holiday_park":
+            extra["camp_type"] = "caravan_park"
+        elif tags.get("brand") and any(
+            b in tags["brand"]
+            for b in ("Big4", "BIG4", "Top Tourist", "Discovery Parks", "G'Day Parks")
+        ):
+            extra["camp_type"] = "caravan_park"
+        elif fee_is_free and tourism_type in ("camp_site", "") and tags.get("amenity") in ("camp_site", "camping", None):
+            extra["camp_type"] = "free"
+        elif operator and tourism_type == "camp_site":
+            extra["camp_type"] = "commercial"
+
+    # ── Free flag ─────────────────────────────────────────────
+    # Resolve free=True/False from fee tags (fee=no / fee=0 → free;
+    # parks authority with no explicit fee tag → assume fee=True)
+    if "free" not in extra:
+        _fee_tag = tags.get("fee", "")
+        if _fee_tag in ("no", "0"):
+            extra["free"] = True
+        elif _fee_tag not in ("", None):
+            extra["free"] = False
+        elif extra.get("operator_is_parks_authority") and _fee_tag == "":
+            # Parks authorities generally charge; flag as not free unless explicit
+            extra["free"] = False
+        # access=customers with no free signal → uncertain, leave unset
+        elif tags.get("access") == "customers" and _fee_tag == "":
+            pass  # don't set free
+
+    # ── Wheelchair accessibility ───────────────────────────────
+    wheelchair = tags.get("wheelchair", "")
+    if wheelchair in ("yes", "designated"):
+        extra["accessible"] = True
+    elif wheelchair in ("no", "limited"):
+        extra["accessible"] = False
+
+    # ── Quality score (0–5) ───────────────────────────────────
+    _score = 0.0
+    if extra.get("has_toilets"):
+        _score += 1.0
+    if extra.get("has_water"):
+        _score += 1.0
+    if extra.get("has_showers"):
+        _score += 0.5
+    if extra.get("has_bbq"):
+        _score += 0.25
+    if extra.get("has_dump_point"):
+        _score += 0.5
+    if extra.get("has_wifi"):
+        _score += 0.25
+    _num_sites = extra.get("num_sites")
+    if _num_sites and _num_sites > 5:
+        _score += 0.25
+    if extra.get("free"):
+        _score += 0.25
+    extra["quality_score"] = min(5.0, round(_score, 2))
+
+    surface_map = {
+        "grass": "grass", "gravel": "gravel", "dirt": "dirt", "unpaved": "dirt",
+        "earth": "dirt", "sand": "sand", "concrete": "concrete", "paved": "concrete",
+        "asphalt": "concrete", "compacted": "gravel",
+    }
+    surface_raw = tags.get("surface")
+    if surface_raw and surface_raw in surface_map:
+        extra["surface"] = surface_map[surface_raw]
+
+    if tags.get("shelter") == "yes":
+        extra["shelter"] = True
+    if tags.get("trees") in ("yes", "many") or tags.get("shade") == "yes":
+        extra["shade"] = True
+
+    # ── Stay rules ────────────────────────────────────────────
+
+    max_stay = tags.get("max_stay") or tags.get("maxstay")
+    if max_stay:
+        try:
+            ms_str = str(max_stay).lower().strip()
+            if "hour" in ms_str:
+                hours_str = re.sub(r"[^\d.]", "", ms_str)
+                if hours_str:
+                    extra["max_stay_days"] = round(float(hours_str) / 24, 1)
+            else:
+                days_str = re.sub(r"[^\d.]", "", ms_str)
+                if days_str:
+                    extra["max_stay_days"] = int(float(days_str))
+        except (ValueError, TypeError):
+            pass
+
+    check_in = tags.get("check_in") or tags.get("checkin")
+    if check_in:
+        extra["check_in"] = str(check_in)[:20]
+
+    check_out = tags.get("check_out") or tags.get("checkout")
+    if check_out:
+        extra["check_out"] = str(check_out)[:20]
+
+    quiet_hours = tags.get("quiet_hours") or tags.get("noise_curfew")
+    if quiet_hours:
+        extra["quiet_hours"] = str(quiet_hours)[:40]
+
+    # ── Cost ─────────────────────────────────────────────────
+
+    charge = tags.get("charge") or tags.get("fee:amount")
+    if charge:
+        m = re.search(r"\$?\s*(\d+(?:\.\d+)?)", str(charge))
+        if m:
+            try:
+                extra["price_per_night_aud"] = float(m.group(1))
+            except ValueError:
+                pass
+        extra["price_notes"] = str(charge)[:80]
+
+
+# State-level rest-area overnight rules (AU).
+# Keyed by `addr:state` or `is_in:state` OSM tag, lowercase.
+_STATE_REST_AREA_RULES: Dict[str, Dict[str, Any]] = {
+    "qld":  {"allowed": True,       "max_hours": 20, "note": "QLD 20hr limit at designated rest areas"},
+    "wa":   {"allowed": True,       "max_hours": 24, "note": "WA 24hr limit at designated rest areas"},
+    "nt":   {"allowed": True,       "max_hours": None, "note": "NT generally allows rest area camping"},
+    "sa":   {"allowed": "check",    "max_hours": None, "note": "SA varies — check signage at each rest area"},
+    "tas":  {"allowed": "check",    "max_hours": None, "note": "TAS varies by council"},
+    "nsw":  {"allowed": "prohibited","max_hours": None, "note": "NSW generally restricts rest area camping; check local council"},
+    "vic":  {"allowed": "prohibited","max_hours": None, "note": "VIC generally prohibits rest area camping"},
+    "act":  {"allowed": "prohibited","max_hours": None, "note": "ACT rest areas not designated for overnight stays"},
+}
+
+# Aliases from various OSM addr:state values
+_STATE_ALIAS: Dict[str, str] = {
+    "queensland": "qld", "western australia": "wa", "northern territory": "nt",
+    "south australia": "sa", "tasmania": "tas", "new south wales": "nsw",
+    "victoria": "vic", "australian capital territory": "act",
+}
+
+
+def _resolve_au_state(tags: Dict[str, Any]) -> Optional[str]:
+    """Return normalised 2-3 letter AU state code from OSM tags, or None."""
+    raw = (
+        tags.get("addr:state")
+        or tags.get("is_in:state")
+        or tags.get("is_in:state_code")
+        or tags.get("state")
+        or ""
+    ).lower().strip()
+    if not raw:
+        return None
+    # Direct match (qld, wa, nt, sa, tas, nsw, vic, act)
+    if raw in _STATE_REST_AREA_RULES:
+        return raw
+    return _STATE_ALIAS.get(raw)
+
+
+def _enrich_overnight_rules(tags: Dict[str, Any], extra: Dict[str, Any]) -> None:
+    """Populate overnight_allowed / overnight_max_hours / overnight_notes from
+    OSM tags and state-level rules.  Already-set values are not overwritten."""
+
+    if "overnight_allowed" in extra:
+        return  # caller already set it (e.g. explicit OSM tag)
+
+    hw = tags.get("highway", "")
+    tourism = tags.get("tourism", "")
+    is_rest_area = hw == "rest_area" or tags.get("amenity") == "rest_area"
+
+    # ── Explicit OSM tags take highest priority ───────────────
+    max_stay_raw = tags.get("max_stay") or tags.get("maxstay") or ""
+    overnight_tag = tags.get("overnight") or tags.get("overnight_camping") or ""
+
+    if overnight_tag in ("yes", "permitted", "allowed"):
+        extra["overnight_allowed"] = True
+    elif overnight_tag in ("no", "prohibited", "not_permitted", "forbidden"):
+        extra["overnight_allowed"] = "prohibited"
+
+    # max_stay already handled in _enrich_camp_tags; read it back
+    if "overnight_allowed" not in extra and max_stay_raw:
+        # Any max_stay tag implies overnight stays are expected
+        extra["overnight_allowed"] = True
+
+    # ── State-level inference for rest areas ─────────────────
+    if "overnight_allowed" not in extra and is_rest_area:
+        state = _resolve_au_state(tags)
+        if state and state in _STATE_REST_AREA_RULES:
+            rule = _STATE_REST_AREA_RULES[state]
+            extra["overnight_allowed"] = rule["allowed"]
+            if rule["max_hours"] is not None:
+                extra["overnight_max_hours"] = rule["max_hours"]
+            if rule["note"]:
+                extra["overnight_notes"] = rule["note"]
+        else:
+            extra["overnight_allowed"] = "check"
+            extra["overnight_notes"] = "Overnight rules vary — check signage"
+
+    # ── Free campsites are implicitly overnight-allowed ───────
+    if "overnight_allowed" not in extra and tourism == "camp_site":
+        if extra.get("camp_type") in ("free", "bush", "showground", "station_stay", "farm_stay", "low_cost"):
+            extra["overnight_allowed"] = True
+        elif tags.get("fee") == "no":
+            extra["overnight_allowed"] = True
+
+
 def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
     tags = el.get("tags") or {}
 
@@ -806,11 +1306,19 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
 
     for k in ("phone", "contact:phone", "website", "contact:website",
               "opening_hours", "fee", "access", "capacity",
-              "brand", "operator", "description"):
+              "brand", "operator", "description",
+              "stars", "internet_access", "wheelchair"):
         v = tags.get(k)
         if v:
             clean_k = k.replace("contact:", "")
             extra[clean_k] = str(v)[:200]
+
+    # Boolean facility tags extracted directly into extra
+    for bool_tag in ("toilets", "drinking_water", "showers", "powered_sites",
+                     "tents", "caravans", "dogs", "bbq", "dump", "fires_allowed"):
+        v = tags.get(bool_tag)
+        if v in ("yes", "no"):
+            extra[bool_tag] = v == "yes"
 
     addr_parts = []
     for ak in ("addr:housenumber", "addr:street", "addr:suburb",
@@ -822,7 +1330,7 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
         extra["address"] = ", ".join(addr_parts)
 
     fuel_types = []
-    for fk in ("fuel:diesel", "fuel:octane_91", "fuel:octane_95",
+    for fk in ("fuel:diesel", "fuel:unleaded", "fuel:octane_91", "fuel:octane_95",
                 "fuel:octane_98", "fuel:lpg", "fuel:adblue"):
         if tags.get(fk) == "yes":
             fuel_types.append(fk.replace("fuel:", ""))
@@ -834,7 +1342,7 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
         # client doesn't incorrectly exclude stations with missing OSM tags.
         extra["has_diesel"] = "diesel" in fuel_types
         extra["has_unleaded"] = any(
-            t in fuel_types for t in ("octane_91", "octane_95", "octane_98")
+            t in fuel_types for t in ("unleaded", "octane_91", "octane_95", "octane_98")
         )
         extra["has_lpg"] = "lpg" in fuel_types
 
@@ -854,6 +1362,133 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
         extra["has_water"] = True
     if tags.get("toilets") == "yes" or tags.get("amenity") == "toilets":
         extra["has_toilets"] = True
+
+    # ── Camping-specific enrichment ───────────────────────────
+    if category == "camp":
+        _enrich_camp_tags(tags, extra)
+
+    # ── Rest area overnight legality ──────────────────────────
+    if category in ("camp", "rest_area"):
+        _enrich_overnight_rules(tags, extra)
+
+    # ── Dump point specifics ──────────────────────────────────
+    if category == "dump_point":
+        waste = tags.get("waste", "")
+        if "chemical" in waste or "black_water" in waste:
+            extra["dump_type"] = "black_water"
+        elif "grey_water" in waste or "grey" in waste:
+            extra["dump_type"] = "grey_water"
+        elif tags.get("sanitary_dump_station") == "yes":
+            extra["dump_type"] = "both"
+
+        dump_fee = tags.get("fee")
+        if dump_fee:
+            extra["dump_fee"] = "free" if dump_fee == "no" else str(dump_fee)[:80]
+            if dump_fee == "no":
+                extra["free"] = True
+
+        acc = tags.get("access", "")
+        if acc in ("private", "customers"):
+            extra["dump_access"] = "customers_only"
+        elif acc == "key":
+            extra["dump_access"] = "key_required"
+        else:
+            extra["dump_access"] = "public"
+
+        if tags.get("drinking_water") == "yes":
+            extra["has_potable_water_at_dump"] = True
+        if tags.get("rinse_water") == "yes" or tags.get("water") == "yes":
+            extra["has_rinse"] = True
+
+    # ── Water fill specifics ──────────────────────────────────
+    if category == "water_fill":
+        extra["has_water"] = True
+
+    # ── Water point specifics ─────────────────────────────────
+    if category == "water":
+        mm = tags.get("man_made", "")
+        dw = tags.get("drinking_water", "")
+        dw_legal = tags.get("drinking_water:legal", "")
+        if dw == "yes" or dw_legal == "yes":
+            extra["water_type"] = "potable"
+            if tags.get("drinking_water:treated") == "yes":
+                extra["water_treated"] = True
+        elif dw == "no":
+            extra["water_type"] = "non_potable"
+
+        n_tag = tags.get("natural", "")
+        if tags.get("amenity") == "drinking_water" or mm == "water_tap":
+            extra["water_flow"] = "tap"
+        elif n_tag == "spring":
+            extra["water_flow"] = "pump"
+            if not extra.get("water_type"):
+                extra["water_type"] = "potable"
+        elif mm in ("water_well",):
+            src = tags.get("water_source", "")
+            if "bore" in src:
+                extra["water_flow"] = "bore"
+                if not extra.get("water_type"):
+                    extra["water_type"] = "bore"
+            else:
+                extra["water_flow"] = "pump"
+
+        if tags.get("seasonal") == "no" or tags.get("intermittent") == "no":
+            extra["water_always_available"] = True
+        elif tags.get("seasonal") == "yes" or tags.get("intermittent") == "yes":
+            extra["water_always_available"] = False
+
+    # ── Toilet specifics ──────────────────────────────────────
+    if category == "toilet":
+        disposal = tags.get("toilets:disposal", "")
+        if disposal == "flush" or tags.get("flush") == "yes":
+            extra["toilet_type"] = "flush"
+        elif disposal in ("pitlatrine", "pit"):
+            extra["toilet_type"] = "pit"
+        elif disposal == "composting":
+            extra["toilet_type"] = "composting"
+        elif tags.get("flush") == "no":
+            extra["toilet_type"] = "long_drop"
+
+        num = tags.get("toilets:num") or tags.get("capacity")
+        if num:
+            try:
+                extra["toilet_count"] = int(num)
+            except (ValueError, TypeError):
+                pass
+
+        toilet_wc = tags.get("wheelchair")
+        if toilet_wc in ("yes", "limited"):
+            extra["has_disabled_access"] = True
+        if tags.get("changing_table") == "yes" or tags.get("diaper") == "yes" or tags.get("baby_feeding") == "yes":
+            extra["has_baby_change"] = True
+        if tags.get("handwashing") == "yes":
+            extra["has_hand_wash"] = True
+
+    # ── Shower specifics ──────────────────────────────────────
+    if category == "shower":
+        hot = tags.get("hot_water", "")
+        solar = tags.get("solar_powered", "") == "yes" or tags.get("solar") == "yes"
+        if solar:
+            extra["shower_type"] = "solar"
+        elif hot in ("yes", "heated"):
+            extra["shower_type"] = "hot"
+        elif hot == "no":
+            extra["shower_type"] = "cold"
+
+        shower_fee = tags.get("fee")
+        if shower_fee:
+            extra["shower_fee"] = "free" if shower_fee == "no" else str(shower_fee)[:80]
+            if shower_fee == "no":
+                extra["free"] = True
+        if tags.get("payment:coins") == "yes" or tags.get("payment:tokens") == "yes":
+            extra["shower_token"] = True
+
+        num = tags.get("capacity") or tags.get("shower:count")
+        if num:
+            try:
+                extra["shower_count"] = int(num)
+            except (ValueError, TypeError):
+                pass
 
     if not (tags.get("name") or tags.get("brand") or tags.get("operator")):
         extra["synthetic_name"] = True
@@ -1035,8 +1670,8 @@ _CRITICAL_INFRA_MAX_COORDS = 300   # can afford many coords with only 2 filters
 # be the only option.  No cluster cap — you want every servo, every hospital.
 # NOTE: fuel + ev_charging are excluded here — they have their own dedicated query.
 _BUNDLE_TIER1_CATS: List[PlaceCategory] = [
-    "water", "toilet", "rest_area",
-    "mechanic", "hospital", "pharmacy", "dump_point",
+    "water", "water_fill", "toilet", "rest_area",
+    "mechanic", "hospital", "pharmacy", "dump_point", "emergency_phone",
     "grocery", "town",
     "camp", "hotel", "motel", "hostel",
     "fast_food",                    # only reliable food option on remote highways
@@ -1110,13 +1745,13 @@ _CATEGORY_IMPORTANCE: Dict[str, float] = {
     # Towns are anchor points
     "town": 3.0, "visitor_info": 2.5,
     # Essential infrastructure — always valuable but not "destination"
-    "fuel": 2.0, "ev_charging": 2.0, "hospital": 2.0, "mechanic": 1.5,
+    "fuel": 2.0, "ev_charging": 2.0, "hospital": 2.0, "mechanic": 1.5, "emergency_phone": 2.5,
     "grocery": 1.5, "pharmacy": 1.5, "camp": 2.5, "hotel": 2.0,
     "motel": 2.0, "hostel": 2.0,
     # Nice-to-have
     "restaurant": 1.5, "cafe": 1.5, "pub": 1.5, "bakery": 1.5,
     "fast_food": 1.0, "bar": 1.0, "rest_area": 1.0, "toilet": 0.5,
-    "water": 1.0, "dump_point": 0.5, "atm": 0.5, "laundromat": 0.5,
+    "water": 1.0, "water_fill": 1.0, "dump_point": 0.5, "atm": 0.5, "laundromat": 0.5,
     "picnic": 1.0, "park": 1.0, "market": 1.5, "pool": 1.5,
     "playground": 1.0, "dog_park": 1.5, "golf": 1.5, "cinema": 1.5,
     "library": 1.0,
@@ -1182,6 +1817,26 @@ def _score_place(
             score += 0.5
         if extra.get("free"):
             score += 0.5
+        # Rich camping amenities (each adds a small quality signal)
+        if extra.get("has_showers"):
+            score += 0.4
+        if extra.get("has_dump_point"):
+            score += 0.3
+        if extra.get("has_bbq"):
+            score += 0.2
+        if extra.get("has_laundry"):
+            score += 0.2
+        if extra.get("has_wifi"):
+            score += 0.1
+        if extra.get("has_phone_reception"):
+            score += 0.3
+        if extra.get("num_sites"):
+            # Larger sites are more likely to be well-maintained
+            ns = int(extra["num_sites"])
+            if ns >= 50:
+                score += 0.3
+            elif ns >= 10:
+                score += 0.1
 
     # 6. Fuel completeness
     if item.category == "fuel":

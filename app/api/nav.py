@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
@@ -9,11 +12,14 @@ from app.core.contracts import (
     CorridorGraphPack,
     ElevationProfile,
     ElevationRequest,
+    FloodOverlay,
     GradeSegment,
     NavPack,
     NavRequest,
+    RouteIntelligenceScore,
     TrafficOverlay,
     HazardOverlay,
+    WeatherOverlay,
 )
 from app.core.errors import bad_request, not_found
 from app.services.routing import Routing
@@ -21,8 +27,17 @@ from app.services.corridor import Corridor
 from app.services.traffic import Traffic
 from app.services.hazards import Hazards
 from app.services.elevation import Elevation, compute_grade_segments
+from app.services.flood import Flood
+from app.services.weather import Weather
+from app.services.fuel import Fuel
+from app.services.rest_areas import RestAreas
+from app.services.coverage import Coverage
+from app.services.wildlife import Wildlife
+from app.services.route_score import RouteScore
 from app.core.storage import put_nav_pack
 from app.core.settings import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/nav")
 
@@ -56,7 +71,36 @@ def get_hazards_service(cache_conn=Depends(get_cache_conn)) -> Hazards:
 
 
 def get_elevation_service() -> Elevation:
-    return Elevation(timeout_s=30.0)
+    from app.core.settings import settings
+    return Elevation(timeout_s=30.0, api_key=settings.opentopography_api_key or None)
+
+
+def get_weather_service(cache_conn=Depends(get_cache_conn)) -> Weather:
+    return Weather(conn=cache_conn)
+
+
+def get_flood_service(cache_conn=Depends(get_cache_conn)) -> Flood:
+    return Flood(conn=cache_conn)
+
+
+def get_fuel_service(cache_conn=Depends(get_cache_conn)) -> Fuel:
+    return Fuel(conn=cache_conn)
+
+
+def get_rest_areas_service(cache_conn=Depends(get_cache_conn)) -> RestAreas:
+    return RestAreas(conn=cache_conn)
+
+
+def get_coverage_service(cache_conn=Depends(get_cache_conn)) -> Coverage:
+    return Coverage(conn=cache_conn)
+
+
+def get_wildlife_service(cache_conn=Depends(get_cache_conn)) -> Wildlife:
+    return Wildlife(conn=cache_conn)
+
+
+def get_route_score_service() -> RouteScore:
+    return RouteScore()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -194,4 +238,117 @@ async def hazards_poll(
         sources=(req.sources or None),
         cache_seconds=req.cache_seconds,
         timeout_s=req.timeout_s,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Weather overlay
+# ──────────────────────────────────────────────────────────────
+
+class WeatherForecastRequest(BaseModel):
+    polyline6: str
+    departure_iso: str
+    avg_speed_kmh: float = Field(default=90.0, gt=0)
+    sample_interval_km: float | None = Field(default=None, gt=0)
+
+
+@router.post("/weather/forecast", response_model=WeatherOverlay)
+async def weather_forecast(
+    req: WeatherForecastRequest,
+    weather: Weather = Depends(get_weather_service),
+) -> WeatherOverlay:
+    if not req.polyline6:
+        bad_request("bad_weather_request", "polyline6 required")
+    if not req.departure_iso:
+        bad_request("bad_weather_request", "departure_iso required")
+    return await weather.forecast_along_route(
+        polyline6=req.polyline6,
+        departure_iso=req.departure_iso,
+        avg_speed_kmh=req.avg_speed_kmh,
+        sample_interval_km=req.sample_interval_km,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Flood gauge overlay
+# ──────────────────────────────────────────────────────────────
+
+class FloodPollRequest(BaseModel):
+    bbox: BBox4
+
+
+@router.post("/flood/poll", response_model=FloodOverlay)
+async def flood_poll(
+    req: FloodPollRequest,
+    flood: Flood = Depends(get_flood_service),
+) -> FloodOverlay:
+    if not req.bbox:
+        bad_request("bad_flood_request", "bbox required")
+    return await flood.poll(bbox=req.bbox)
+
+
+# ──────────────────────────────────────────────────────────────
+# Route Intelligence Score
+# ──────────────────────────────────────────────────────────────
+
+class RouteScoreRequest(BaseModel):
+    polyline6: str
+    bbox: BBox4
+    departure_iso: str
+    avg_speed_kmh: float = Field(default=90.0, gt=0)
+
+
+@router.post("/route-score", response_model=RouteIntelligenceScore)
+async def route_score(
+    req: RouteScoreRequest,
+    traffic: Traffic = Depends(get_traffic_service),
+    hazards: Hazards = Depends(get_hazards_service),
+    weather: Weather = Depends(get_weather_service),
+    flood: Flood = Depends(get_flood_service),
+    fuel: Fuel = Depends(get_fuel_service),
+    rest: RestAreas = Depends(get_rest_areas_service),
+    coverage: Coverage = Depends(get_coverage_service),
+    wildlife: Wildlife = Depends(get_wildlife_service),
+    scorer: RouteScore = Depends(get_route_score_service),
+) -> RouteIntelligenceScore:
+    if not req.polyline6:
+        bad_request("bad_score_request", "polyline6 required")
+    if not req.departure_iso:
+        bad_request("bad_score_request", "departure_iso required")
+
+    # Fetch all overlays concurrently — failures are caught individually
+    results = await asyncio.gather(
+        traffic.poll(bbox=req.bbox),
+        hazards.poll(bbox=req.bbox),
+        weather.forecast_along_route(
+            polyline6=req.polyline6,
+            departure_iso=req.departure_iso,
+            avg_speed_kmh=req.avg_speed_kmh,
+        ),
+        flood.poll(bbox=req.bbox),
+        fuel.along_route(polyline6=req.polyline6),
+        rest.along_route(polyline6=req.polyline6),
+        coverage.along_route(polyline6=req.polyline6),
+        wildlife.along_route(polyline6=req.polyline6),
+        return_exceptions=True,
+    )
+
+    traffic_ov, hazards_ov, weather_ov, flood_ov, fuel_ov, rest_ov, coverage_ov, wildlife_ov = results
+
+    # Replace exceptions with None and log them
+    def _safe(val, name: str):
+        if isinstance(val, Exception):
+            logger.warning("route-score: %s overlay failed: %s", name, val)
+            return None
+        return val
+
+    return scorer.compute(
+        traffic=_safe(traffic_ov, "traffic"),
+        hazards=_safe(hazards_ov, "hazards"),
+        weather=_safe(weather_ov, "weather"),
+        flood=_safe(flood_ov, "flood"),
+        fuel=_safe(fuel_ov, "fuel"),
+        rest=_safe(rest_ov, "rest"),
+        coverage=_safe(coverage_ov, "coverage"),
+        wildlife=_safe(wildlife_ov, "wildlife"),
     )
