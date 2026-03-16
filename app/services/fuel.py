@@ -44,9 +44,8 @@ from app.core.polyline6 import decode_polyline6
 from app.core.settings import settings
 from app.core.storage import get_fuel_pack, put_fuel_pack
 from app.core.time import utc_now_iso
-from app.core.geo import haversine_km
+from app.core.geo import haversine_km, min_dist_to_route
 from app.core.cache_utils import is_fresh, stable_key
-from app.core.geo import haversine_km
 
 
 # ══════════════════════════════════════════════════════════════
@@ -77,14 +76,6 @@ def _expand_bbox(bbox: BBox4, km: float) -> BBox4:
     )
 
 
-def _min_dist_to_route(lat: float, lng: float, coords: List[Tuple[float, float]]) -> float:
-    """Minimum distance in km from a point to any coordinate in a decoded polyline."""
-    best = math.inf
-    for rlat, rlng in coords:
-        d = haversine_km((lat, lng), (rlat, rlng))
-        if d < best:
-            best = d
-    return best
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1322,7 +1313,7 @@ class Fuel:
         # Filter stations to those within buffer_km of the actual route line
         filtered_stations: List[FuelStation] = []
         for s in overlay.stations:
-            d = _min_dist_to_route(s.lat, s.lng, coords)
+            d = min_dist_to_route(s.lat, s.lng, coords)
             if d <= buffer_km:
                 s2 = s.model_copy(update={"distance_km": round(d, 2)})
                 filtered_stations.append(s2)
@@ -1330,7 +1321,7 @@ class Fuel:
         # Filter EV chargers similarly
         filtered_ev: List[EVCharger] = []
         for c in overlay.ev_chargers:
-            d = _min_dist_to_route(c.lat, c.lng, coords)
+            d = min_dist_to_route(c.lat, c.lng, coords)
             if d <= buffer_km:
                 c2 = c.model_copy(update={"distance_km": round(d, 2)})
                 filtered_ev.append(c2)

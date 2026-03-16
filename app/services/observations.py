@@ -58,6 +58,43 @@ def _highest_severity(severities: List[str]) -> str:
     return best
 
 
+# Typical report count thresholds per type for full confidence.
+# e.g., 3 independent reporters saying "road closed" = 1.0 confidence.
+_CONFIDENCE_THRESHOLD: Dict[str, int] = {
+    "road_closure": 2,
+    "hazard": 2,
+    "road_condition": 3,
+    "fuel_price": 1,
+    "speed_trap": 2,
+    "weather": 3,
+    "campsite": 1,
+    "general": 3,
+}
+
+
+def _compute_confidence(obs_type: str, reporters: int, age_hours: float) -> float:
+    """
+    Confidence score 0.0-1.0 based on:
+    - Reporter count vs threshold (more reporters = higher base confidence)
+    - Temporal decay (older reports lose confidence toward 0)
+    """
+    threshold = _CONFIDENCE_THRESHOLD.get(obs_type, 3)
+    # Base confidence from reporter count (capped at 1.0)
+    base = min(reporters / max(threshold, 1), 1.0)
+
+    # Temporal decay: full confidence up to 25% of TTL, then linear decay to 0
+    ttl_hours = _DEFAULT_TTL.get(obs_type, 48)
+    fresh_window = ttl_hours * 0.25
+    if age_hours <= fresh_window:
+        decay = 1.0
+    elif age_hours >= ttl_hours:
+        decay = 0.0
+    else:
+        decay = 1.0 - (age_hours - fresh_window) / (ttl_hours - fresh_window)
+
+    return round(min(base * decay, 1.0), 2)
+
+
 class Observations:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -169,6 +206,21 @@ class Observations:
 
                 # Use the most recent message/value
                 latest = max(cluster, key=lambda o: o["created_at"])
+                num_reporters = len(user_ids)
+
+                # Compute age from most recent report
+                try:
+                    last_dt = datetime.fromisoformat(
+                        created_times[-1].replace("Z", "+00:00")
+                    )
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                except Exception:
+                    age_hours = 24.0  # fallback
+
+                confidence = _compute_confidence(obs_type, num_reporters, age_hours)
+                is_recent = age_hours < 0.5  # within 30 minutes
 
                 results.append(AggregatedObservation(
                     type=obs_type,
@@ -180,7 +232,9 @@ class Observations:
                     report_count=len(cluster),
                     first_reported_at=created_times[0],
                     last_reported_at=created_times[-1],
-                    reporters=len(user_ids),
+                    reporters=num_reporters,
+                    confidence=confidence,
+                    is_recent=is_recent,
                 ))
 
         results.sort(key=lambda r: r.last_reported_at, reverse=True)

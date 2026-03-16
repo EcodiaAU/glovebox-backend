@@ -26,6 +26,7 @@ from app.services.bundle import Bundle
 from app.services.places import Places
 from app.services.places_store import PlacesStore
 from app.services.rest_areas import RestAreas
+from app.core.http_client import shutdown_http_client
 
 # ──────────────────────────────────────────────────────────────
 # Structured logging
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────
     logger.info("[app] Shutting down")
+    await shutdown_http_client()
     if _edges_db is not None:
         try:
             _edges_db.close()

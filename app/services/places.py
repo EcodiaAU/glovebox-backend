@@ -13,7 +13,7 @@ import functools
 
 import httpx
 
-from app.core.contracts import PlaceItem, PlacesPack, PlacesRequest, BBox4, PlaceCategory
+from app.core.contracts import PlaceItem, PlacesPack, PlacesRequest, BBox4, PlaceCategory, StopSuggestionItem
 from app.core.keying import places_key
 from app.core.time import utc_now_iso
 from app.core.storage import get_places_pack, put_places_pack
@@ -3078,3 +3078,122 @@ class Places:
             )
 
         return out
+
+    def suggest_stops(
+        self,
+        *,
+        bbox: BBox4,
+        midpoint: Tuple[float, float],
+        existing_categories: List[PlaceCategory],
+        limit: int = 4,
+    ) -> List[StopSuggestionItem]:
+        """Return up to `limit` POI suggestions for the trip stop list.
+
+        Strategy:
+          1. Pick candidate categories — prioritise types NOT already in the trip
+             (category diversity), but include under-represented essentials too.
+          2. Query Overpass within the trip bounding box for those categories.
+          3. Score each candidate: proximity to route midpoint + category importance
+             + richness signals, penalised if the category is already well represented.
+          4. Deduplicate by category (one suggestion per category) then return top N.
+        """
+        existing_set: Set[str] = set(str(c) for c in existing_categories)
+
+        # ── 1. Choose candidate categories ───────────────────────────────
+        # High-value suggestion categories ordered by trip-worthiness.
+        CANDIDATE_ORDER: List[PlaceCategory] = [
+            # Destination highlights (most likely to be interesting additions)
+            "viewpoint", "waterfall", "beach", "swimming_hole", "hot_spring",
+            "national_park", "cave", "hiking", "fishing", "surf",
+            "museum", "heritage", "winery", "brewery", "attraction",
+            # Practical essentials people forget to add
+            "camp", "fuel", "grocery",
+            "cafe", "restaurant", "pub",
+            "picnic", "park",
+        ]
+
+        # Select up to 10 candidate categories — prefer those NOT in existing stops,
+        # but include a few existing ones if they're essential infrastructure.
+        ALWAYS_SUGGEST: Set[str] = {"fuel", "camp", "grocery"}
+        candidates: List[PlaceCategory] = []
+        for cat in CANDIDATE_ORDER:
+            if cat not in existing_set:
+                candidates.append(cat)
+            elif cat in ALWAYS_SUGGEST:
+                candidates.append(cat)
+            if len(candidates) >= 10:
+                break
+
+        if not candidates:
+            # Fallback: just use high-value categories
+            candidates = ["viewpoint", "waterfall", "beach", "national_park", "camp"]
+
+        # ── 2. Overpass bbox query ────────────────────────────────────────
+        filters = _overpass_filters_for_categories(candidates)
+        ql = _build_overpass_ql(bbox=bbox, filters=filters, name_clause="")
+
+        timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
+        items: List[PlaceItem] = []
+        try:
+            with httpx.Client(timeout=float(timeout_s)) as client:
+                data = _fetch_overpass_with_retries(client=client, ql=ql)
+            for el in data.get("elements", []):
+                item = _element_to_item(el)
+                if item and str(item.category) in {str(c) for c in candidates}:
+                    items.append(item)
+        except Exception as exc:
+            logger.warning("suggest_stops overpass failed: %s", exc)
+            return []
+
+        if not items:
+            return []
+
+        # ── 3. Score candidates ───────────────────────────────────────────
+        mid_lat, mid_lng = midpoint
+        # Max distance from midpoint to bbox corner (normalisation factor)
+        max_dist_m = max(
+            _haversine_m((mid_lat, mid_lng), (bbox.minLat, bbox.minLng)),
+            _haversine_m((mid_lat, mid_lng), (bbox.maxLat, bbox.maxLng)),
+            1000.0,
+        )
+
+        scored: List[Tuple[float, PlaceItem]] = []
+        for item in items:
+            base = _score_place(item)
+
+            # Proximity bonus: items near the midpoint score higher
+            dist_m = _haversine_m((item.lat, item.lng), (mid_lat, mid_lng))
+            proximity = 1.0 - min(1.0, dist_m / max_dist_m)  # 0–1, higher = closer
+            base += proximity * 3.0
+
+            # Diversity penalty: already have this category in the trip
+            if str(item.category) in existing_set:
+                base *= 0.4
+
+            scored.append((base, item))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # ── 4. Deduplicate by category, return top N ──────────────────────
+        seen_cats: Set[str] = set()
+        result: List[StopSuggestionItem] = []
+        for score, item in scored:
+            cat_str = str(item.category)
+            if cat_str in seen_cats:
+                continue
+            seen_cats.add(cat_str)
+            result.append(
+                StopSuggestionItem(
+                    id=item.id,
+                    name=item.name,
+                    lat=item.lat,
+                    lng=item.lng,
+                    category=item.category,
+                    score=round(score, 2),
+                    extra=item.extra or {},
+                )
+            )
+            if len(result) >= limit:
+                break
+
+        return result

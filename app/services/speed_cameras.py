@@ -41,7 +41,8 @@ from app.core.contracts import RoadBlackSpot, SpeedCamera, RoadOccupancy, SpeedC
 from app.core.settings import settings
 from app.core.storage import get_cameras_pack, put_cameras_pack
 from app.core.time import utc_now_iso
-from app.core.geo import bbox_from_coords, decode_polyline6, haversine_km, min_dist_to_route, sample_route
+from app.core.geo import bbox_from_coords, bbox_overlaps, decode_polyline6, haversine_km, min_dist_to_route, sample_route
+from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh, stable_key
 
 logger = logging.getLogger(__name__)
@@ -89,23 +90,10 @@ _STATIC_CACHE_TTL_S = 7 * 86_400  # 7 days
 # Geometry helpers
 # ══════════════════════════════════════════════════════════════
 
-def _bbox_overlaps(
-    min_lat: float, min_lng: float, max_lat: float, max_lng: float,
-    region_lat_min: float, region_lat_max: float,
-    region_lng_min: float, region_lng_max: float,
-) -> bool:
-    return (
-        min_lat <= region_lat_max
-        and max_lat >= region_lat_min
-        and min_lng <= region_lng_max
-        and max_lng >= region_lng_min
-    )
-
-
 def _bbox_overlaps_brisbane(
     min_lat: float, min_lng: float, max_lat: float, max_lng: float,
 ) -> bool:
-    return _bbox_overlaps(
+    return bbox_overlaps(
         min_lat, min_lng, max_lat, max_lng,
         _BRISBANE_LAT_MIN, _BRISBANE_LAT_MAX, _BRISBANE_LNG_MIN, _BRISBANE_LNG_MAX,
     )
@@ -707,22 +695,17 @@ class SpeedCameras:
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(coords, buffer_km)
         warnings: List[str] = []
 
-        include_qld = _bbox_overlaps(
+        include_qld = bbox_overlaps(
             min_lat, min_lng, max_lat, max_lng,
             _QLD_LAT_MIN, _QLD_LAT_MAX, _QLD_LNG_MIN, _QLD_LNG_MAX,
         )
-        include_act = _bbox_overlaps(
+        include_act = bbox_overlaps(
             min_lat, min_lng, max_lat, max_lng,
             _ACT_LAT_MIN, _ACT_LAT_MAX, _ACT_LNG_MIN, _ACT_LNG_MAX,
         )
         include_brisbane = _bbox_overlaps_brisbane(min_lat, min_lng, max_lat, max_lng)
 
-        transport = httpx.AsyncHTTPTransport(retries=1)
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            transport=transport,
-            timeout=httpx.Timeout(_HTTP_TIMEOUT),
-        ) as client:
+        async with http_client(timeout=_HTTP_TIMEOUT) as client:
             tasks = [
                 _fetch_nsw_cameras(
                     client, min_lat, min_lng, max_lat, max_lng,

@@ -73,6 +73,7 @@ def _compute_safety(
     coverage: Optional[CoverageOverlay],
     wildlife: Optional[WildlifeOverlay],
     bushfire: Optional[BushfireOverlay] = None,
+    weather: Optional[WeatherOverlay] = None,
 ) -> RouteScoreCategory:
     score = 10.0
     factors: List[str] = []
@@ -174,6 +175,47 @@ def _compute_safety(
             deduct = min(2 * len(watch_act), 4)
             score -= deduct
             factors.append(f"{len(watch_act)} bushfire watch-and-act(s) near route")
+
+    # ── Cross-overlay synergy: combined risks worse than sum of parts ──
+
+    # Flood + no coverage = stranded with no way to call help
+    has_flood_risk = flood and any(
+        g.severity in ("major", "moderate") and g.trend == "rising"
+        for g in flood.gauges
+    )
+    has_coverage_gap = coverage and any(
+        g.gap_km > 50 for g in coverage.gaps if g.carrier == "all"
+    )
+    if has_flood_risk and has_coverage_gap:
+        score -= 1.5
+        factors.append("Flood risk in area with no mobile coverage — rescue access limited")
+
+    # Hazard + no coverage = can't report or call for help
+    has_high_hazard = hazards and any(e.severity == "high" for e in hazards.items)
+    if has_high_hazard and has_coverage_gap:
+        score -= 1.0
+        factors.append("High-severity hazard in coverage dead zone")
+
+    # Bushfire + no coverage = critical — can't receive emergency alerts
+    has_bushfire_risk = bushfire and any(
+        f.alert_level and f.alert_level.lower() in ("emergency warning", "emergency", "watch and act")
+        and (f.distance_from_route_km is None or f.distance_from_route_km < 50)
+        for f in bushfire.incidents
+    )
+    if has_bushfire_risk and has_coverage_gap:
+        score -= 2.0
+        factors.append("Active bushfire near route with no mobile coverage — cannot receive alerts")
+
+    # Wildlife twilight + poor visibility (weather) = compounded animal strike risk
+    has_wildlife_twilight = wildlife and any(
+        z.risk_level == "high" and z.is_twilight_risk for z in wildlife.zones
+    )
+    has_poor_visibility = weather and any(
+        p.visibility_m is not None and p.visibility_m < 1000 for p in weather.points
+    )
+    if has_wildlife_twilight and has_poor_visibility:
+        score -= 1.0
+        factors.append("High wildlife risk at twilight with poor visibility")
 
     score = max(0.0, score)
     return RouteScoreCategory(score=round(score, 1), label=_score_label(score), factors=factors)
@@ -280,6 +322,28 @@ def _compute_conditions(
         elif air_quality.overall_aqi >= 3:
             score -= 1
             factors.append(f"Moderate air quality (AQI {air_quality.overall_aqi}) — sensitive groups affected")
+
+    # ── Cross-overlay synergy: combined conditions ──
+
+    # Extreme heat + poor AQI = severe health risk
+    has_extreme_heat = weather and any(p.temperature_c > 38 for p in weather.points)
+    has_poor_aqi = air_quality and air_quality.overall_aqi >= 4
+    if has_extreme_heat and has_poor_aqi:
+        score -= 1.5
+        factors.append("Extreme heat combined with poor air quality — serious health risk")
+
+    # Heavy rain + flood gauges rising = road likely impassable
+    has_heavy_rain = weather and any(
+        p.precipitation_probability_pct > 70 and p.precipitation_mm > 5
+        for p in weather.points
+    )
+    has_rising_flood = flood and any(
+        g.trend == "rising" and g.severity in ("moderate", "major")
+        for g in flood.gauges
+    )
+    if has_heavy_rain and has_rising_flood:
+        score -= 1.0
+        factors.append("Heavy rain forecast with rising flood gauges — road conditions may worsen rapidly")
 
     score = max(0.0, score)
     return RouteScoreCategory(score=round(score, 1), label=_score_label(score), factors=factors)
@@ -522,7 +586,7 @@ class RouteScore:
         if wildlife is None:
             data_warnings.append("Wildlife data unavailable — safety score may be incomplete")
 
-        safety_cat = _compute_safety(traffic, hazards, flood, coverage, wildlife, bushfire)
+        safety_cat = _compute_safety(traffic, hazards, flood, coverage, wildlife, bushfire, weather)
         conditions_cat = _compute_conditions(weather, flood, traffic, air_quality)
         services_cat = _compute_services(fuel, rest)
         weather_cat = _compute_weather_comfort(weather)

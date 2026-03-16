@@ -43,6 +43,7 @@ from app.core.settings import settings
 from app.core.storage import get_bushfire_pack, put_bushfire_pack
 from app.core.time import utc_now_iso
 from app.core.geo import bbox_from_coords, decode_polyline6, haversine_km, min_dist_to_route, sample_route
+from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh, stable_key
 
 logger = logging.getLogger(__name__)
@@ -440,12 +441,7 @@ class Bushfire:
         warnings: List[str] = []
 
         # ── Fetch NSW RFS + FIRMS concurrently ──────────────────
-        transport = httpx.AsyncHTTPTransport(retries=1)
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            transport=transport,
-            timeout=httpx.Timeout(30.0),
-        ) as client:
+        async with http_client(timeout=30.0) as client:
             rfs_task = _fetch_rfs(client, warnings)
             firms_task = _fetch_firms(client, warnings)
             rfs_data, firms_csv = await asyncio.gather(

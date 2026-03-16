@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import base64
 import logging
 import random
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -21,7 +20,8 @@ from app.core.polyline6 import decode_polyline6
 from app.core.settings import settings
 from app.core.storage import get_rest_area_pack, put_rest_area_pack
 from app.core.time import utc_now_iso
-from app.core.geo import bbox_from_coords, haversine_km, min_dist_to_route
+from app.core.geo import bbox_from_coords, haversine_km, min_dist_to_route_with_km
+from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh
 
 logger = logging.getLogger(__name__)
@@ -127,23 +127,23 @@ def _is_retryable(code: int) -> bool:
     return code in (429, 502, 503, 504)
 
 
-def _fetch_overpass(*, client: httpx.Client, ql: str) -> Dict[str, Any]:
+async def _fetch_overpass(*, client: httpx.AsyncClient, ql: str) -> Dict[str, Any]:
     attempts = int(getattr(settings, "overpass_retries", 2))
     base_sleep = float(getattr(settings, "overpass_retry_base_s", 1.0))
 
     last_exc: Optional[Exception] = None
     for i in range(max(1, attempts)):
         try:
-            r = client.post(settings.overpass_url, content=ql.encode("utf-8"))
+            r = await client.post(settings.overpass_url, content=ql.encode("utf-8"))
             if _is_retryable(r.status_code):
-                time.sleep(base_sleep * (2 ** i) + random.random() * 0.25)
+                await asyncio.sleep(base_sleep * (2 ** i) + random.random() * 0.25)
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as exc:
             last_exc = exc
             if i < attempts - 1:
-                time.sleep(base_sleep * (2 ** i))
+                await asyncio.sleep(base_sleep * (2 ** i))
 
     raise RuntimeError(f"Overpass failed after {attempts} attempts: {last_exc}")
 
@@ -362,23 +362,24 @@ def _geojson_centroid(geometry: Dict[str, Any]) -> Optional[Tuple[float, float]]
     return None
 
 
-def _fetch_qld_rest_areas(client: httpx.Client) -> List[RestArea]:
+async def _fetch_qld_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
     """Fetch QLD government rest areas (paginated ArcGIS MapServer)."""
     features: List[Dict[str, Any]] = []
 
-    def _get_page(offset: int) -> List[Dict[str, Any]]:
+    async def _get_page(offset: int) -> List[Dict[str, Any]]:
         url = _QLD_BASE.format(offset=offset)
-        r = client.get(url, timeout=_GOV_TIMEOUT)
+        r = await client.get(url, timeout=_GOV_TIMEOUT)
         r.raise_for_status()
         return r.json().get("features") or []
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futs = {pool.submit(_get_page, 0): 0, pool.submit(_get_page, 1000): 1000}
-        for fut in as_completed(futs):
-            try:
-                features.extend(fut.result())
-            except Exception as exc:
-                logger.warning("rest_areas: QLD page offset=%d failed: %r", futs[fut], exc)
+    results = await asyncio.gather(
+        _get_page(0), _get_page(1000), return_exceptions=True,
+    )
+    for i, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.warning("rest_areas: QLD page offset=%d failed: %r", i * 1000, res)
+        elif isinstance(res, list):
+            features.extend(res)
 
     areas: List[RestArea] = []
     for feat in features:
@@ -429,7 +430,7 @@ def _fetch_qld_rest_areas(client: httpx.Client) -> List[RestArea]:
     return areas
 
 
-def _fetch_wa_rest_areas(client: httpx.Client) -> List[RestArea]:
+async def _fetch_wa_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
     """Fetch WA government rest areas from 4 MainRoads endpoints concurrently.
 
     The host may block non-AU IPs — any request failure is silently skipped.
@@ -442,9 +443,9 @@ def _fetch_wa_rest_areas(client: httpx.Client) -> List[RestArea]:
         "road_stopping":  (0, False),
     }
 
-    def _fetch_tier(tier: str, url: str) -> Tuple[str, List[Dict[str, Any]]]:
+    async def _fetch_tier(tier: str, url: str) -> Tuple[str, List[Dict[str, Any]]]:
         try:
-            r = client.get(url, timeout=_GOV_TIMEOUT)
+            r = await client.get(url, timeout=_GOV_TIMEOUT)
             if not r.is_success:
                 logger.warning("rest_areas: WA tier=%s returned HTTP %d — skipping", tier, r.status_code)
                 return tier, []
@@ -453,12 +454,12 @@ def _fetch_wa_rest_areas(client: httpx.Client) -> List[RestArea]:
             logger.warning("rest_areas: WA tier=%s connection error — skipping: %r", tier, exc)
             return tier, []
 
+    tier_results = await asyncio.gather(
+        *[_fetch_tier(tier, url) for tier, url in _WA_ENDPOINTS.items()],
+    )
     tier_features: Dict[str, List[Dict[str, Any]]] = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futs = {pool.submit(_fetch_tier, tier, url): tier for tier, url in _WA_ENDPOINTS.items()}
-        for fut in as_completed(futs):
-            tier, feats = fut.result()
-            tier_features[tier] = feats
+    for tier, feats in tier_results:
+        tier_features[tier] = feats
 
     areas: List[RestArea] = []
     for tier, features in tier_features.items():
@@ -517,8 +518,8 @@ def _fetch_wa_rest_areas(client: httpx.Client) -> List[RestArea]:
     return areas
 
 
-def _fetch_nsw_rest_areas(
-    client: httpx.Client, bbox: Tuple[float, float, float, float]
+async def _fetch_nsw_rest_areas(
+    client: httpx.AsyncClient, bbox: Tuple[float, float, float, float]
 ) -> List[RestArea]:
     """Fetch NSW rest areas from TfNSW Open Data spatial API.
 
@@ -537,7 +538,7 @@ def _fetch_nsw_rest_areas(
     )
 
     try:
-        r = client.get(
+        r = await client.get(
             settings.nsw_rest_areas_url,
             params={"format": "json", "q": sql},
             headers={"Authorization": f"apikey {api_key}"},
@@ -768,58 +769,43 @@ class RestAreas:
         wa_areas: List[RestArea] = []
         nsw_rest_areas: List[RestArea] = []
 
-        def _do_overpass() -> Dict[str, Any]:
-            with httpx.Client(timeout=timeout) as client:
-                return _fetch_overpass(client=client, ql=ql)
+        async with http_client(timeout=max(float(settings.overpass_timeout_s), 30.0)) as client:
+            results = await asyncio.gather(
+                _fetch_overpass(client=client, ql=ql),
+                _fetch_qld_rest_areas(client),
+                _fetch_wa_rest_areas(client),
+                _fetch_nsw_rest_areas(client, bbox),
+                return_exceptions=True,
+            )
 
-        def _do_qld() -> List[RestArea]:
-            with httpx.Client(timeout=_GOV_TIMEOUT) as client:
-                return _fetch_qld_rest_areas(client)
+        # Unpack results with error handling
+        if isinstance(results[0], Exception):
+            logger.warning("rest_areas: Overpass query failed: %r", results[0])
+            warnings.append(f"Overpass query failed: {results[0]}")
+        elif isinstance(results[0], dict):
+            overpass_result = results[0]
 
-        def _do_wa() -> List[RestArea]:
-            with httpx.Client(timeout=_GOV_TIMEOUT) as client:
-                return _fetch_wa_rest_areas(client)
+        if isinstance(results[1], Exception):
+            logger.warning("rest_areas: QLD fetch failed: %r", results[1])
+        elif isinstance(results[1], list):
+            qld_areas = results[1]
 
-        def _do_nsw_rest() -> List[RestArea]:
-            with httpx.Client() as client:
-                return _fetch_nsw_rest_areas(client, bbox)
+        if isinstance(results[2], Exception):
+            logger.warning("rest_areas: WA fetch failed: %r", results[2])
+        elif isinstance(results[2], list):
+            wa_areas = results[2]
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            fut_overpass = pool.submit(_do_overpass)
-            fut_qld = pool.submit(_do_qld)
-            fut_wa = pool.submit(_do_wa)
-            fut_nsw_rest = pool.submit(_do_nsw_rest)
-
-            try:
-                overpass_result = fut_overpass.result()
-                throttle = float(getattr(settings, "overpass_throttle_s", 0.2))
-                if throttle > 0:
-                    time.sleep(throttle)
-            except Exception as exc:
-                logger.warning("rest_areas: Overpass query failed: %r", exc)
-                warnings.append(f"Overpass query failed: {exc}")
-
-            try:
-                qld_areas = fut_qld.result()
-            except Exception as exc:
-                logger.warning("rest_areas: QLD fetch failed: %r", exc)
-
-            try:
-                wa_areas = fut_wa.result()
-            except Exception as exc:
-                logger.warning("rest_areas: WA fetch failed: %r", exc)
-
-            try:
-                nsw_rest_areas = fut_nsw_rest.result()
-            except Exception as exc:
-                logger.warning("rest_areas: NSW rest areas fetch failed: %r", exc)
+        if isinstance(results[3], Exception):
+            logger.warning("rest_areas: NSW rest areas fetch failed: %r", results[3])
+        elif isinstance(results[3], list):
+            nsw_rest_areas = results[3]
 
         # Parse and corridor-filter Overpass results
         for el in overpass_result.get("elements") or []:
             area = _parse_element(el)
             if area is None:
                 continue
-            dist_km, km_along = min_dist_to_route(area.lat, area.lng, samples)
+            dist_km, km_along = min_dist_to_route_with_km(area.lat, area.lng, samples)
             if dist_km > buffer_km:
                 continue
             area.distance_from_route_km = round(dist_km, 2)
@@ -830,7 +816,7 @@ class RestAreas:
         for area in (*qld_areas, *wa_areas, *nsw_rest_areas):
             if not (min_lat <= area.lat <= max_lat and min_lng <= area.lng <= max_lng):
                 continue
-            dist_km, km_along = min_dist_to_route(area.lat, area.lng, samples)
+            dist_km, km_along = min_dist_to_route_with_km(area.lat, area.lng, samples)
             if dist_km > buffer_km:
                 continue
             area.distance_from_route_km = round(dist_km, 2)

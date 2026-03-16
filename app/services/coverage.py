@@ -39,7 +39,7 @@ from app.core.storage import (
     query_cell_towers_in_buckets,
 )
 from app.core.time import utc_now_iso
-from app.core.geo import haversine_km
+from app.core.geo import haversine_km, cumulative_distances, interpolated_samples
 from app.core.cache_utils import is_fresh, stable_key
 
 logger = logging.getLogger(__name__)
@@ -70,51 +70,6 @@ _LEVEL_SCORE: Dict[str, int] = {
     "weak":        1,
     "no_coverage": 0,
 }
-
-
-# ──────────────────────────────────────────────────────────────
-# Geo helpers
-# ──────────────────────────────────────────────────────────────
-
-
-def _cumulative_distances(coords: List[Tuple[float, float]]) -> List[float]:
-    dists = [0.0]
-    for i in range(1, len(coords)):
-        d = haversine_km((coords[i - 1][0], coords[i - 1][1]), (coords[i][0], coords[i][1]))
-        dists.append(dists[-1] + d)
-    return dists
-
-
-def _sample_points(
-    coords: List[Tuple[float, float]],
-    cum_dists: List[float],
-    interval_km: float,
-) -> List[Tuple[float, float, float]]:
-    """Sample every interval_km; always include start and end. Returns [(lat, lng, km), ...]."""
-    total_km = cum_dists[-1]
-    if total_km == 0 or not coords:
-        return []
-
-    samples: List[Tuple[float, float, float]] = [(coords[0][0], coords[0][1], 0.0)]
-    target_km = interval_km
-    i = 0
-    while target_km < total_km:
-        while i < len(cum_dists) - 1 and cum_dists[i + 1] < target_km:
-            i += 1
-        if i >= len(coords) - 1:
-            break
-        seg_len = cum_dists[i + 1] - cum_dists[i]
-        frac = (target_km - cum_dists[i]) / seg_len if seg_len > 0 else 0.0
-        lat = coords[i][0] + frac * (coords[i + 1][0] - coords[i][0])
-        lng = coords[i][1] + frac * (coords[i + 1][1] - coords[i][1])
-        samples.append((lat, lng, target_km))
-        target_km += interval_km
-
-    last_lat, last_lng = coords[-1]
-    if not samples or haversine_km((samples[-1][0], samples[-1][1]), (last_lat, last_lng)) > 0.5:
-        samples.append((last_lat, last_lng, total_km))
-
-    return samples
 
 
 def _bucket(coord: float) -> int:
@@ -411,8 +366,8 @@ class Coverage:
             _persist(self.conn, overlay, algo_version)
             return overlay
 
-        cum_dists = _cumulative_distances(coords)
-        samples = _sample_points(coords, cum_dists, sample_interval_km)
+        cum_dists = cumulative_distances(coords)
+        samples = interpolated_samples(coords, cum_dists, sample_interval_km)
 
         if not samples:
             overlay = CoverageOverlay(

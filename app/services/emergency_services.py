@@ -33,7 +33,8 @@ from app.core.contracts import EmergencyFacility, EmergencyServicesOverlay
 from app.core.settings import settings
 from app.core.storage import get_emergency_pack, put_emergency_pack
 from app.core.time import utc_now_iso
-from app.core.geo import bbox_from_coords, decode_polyline6, min_dist_to_route, sample_route
+from app.core.geo import bbox_from_coords, decode_polyline6, filter_by_corridor, sample_route
+from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh, stable_key
 
 logger = logging.getLogger(__name__)
@@ -265,12 +266,7 @@ class EmergencyServices:
         warnings: List[str] = []
 
         # Query layers concurrently
-        transport = httpx.AsyncHTTPTransport(retries=1)
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            transport=transport,
-            timeout=httpx.Timeout(25.0),
-        ) as client:
+        async with http_client(timeout=25.0) as client:
             ambulance_task = _query_layer(client, _LAYER_AMBULANCE, bbox, warnings)
             police_task = _query_layer(client, _LAYER_POLICE, bbox, warnings)
             metro_fire_task = _query_layer(client, _LAYER_METRO_FIRE, bbox, warnings)
@@ -307,12 +303,12 @@ class EmergencyServices:
                 warnings.append(f"emergency:layer fetch error: {batch}")
 
         # Compute distance from route and filter within buffer
-        filtered: List[EmergencyFacility] = []
-        for fac in all_facilities:
-            dist = min_dist_to_route(fac.lat, fac.lng, samples)
-            if dist <= buffer_km:
-                fac.distance_from_route_km = round(dist, 2)
-                filtered.append(fac)
+        filtered = filter_by_corridor(
+            all_facilities,
+            samples,
+            buffer_km,
+            set_distance=lambda fac, d: setattr(fac, "distance_from_route_km", d),
+        )
 
         # Sort by distance from route
         filtered.sort(key=lambda f: f.distance_from_route_km or 0.0)

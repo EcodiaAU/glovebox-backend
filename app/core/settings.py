@@ -415,14 +415,25 @@ class Settings(BaseSettings):
     revenuecat_webhook_secret: str = Field(default="", alias="REVENUECAT_WEBHOOK_SECRET")
 
     # ──────────────────────────────────────────────────────────────
-    # Weather overlay (disabled — Open-Meteo removed)
+    # Weather overlay — Open-Meteo BOM ACCESS-G (self-hosted or public)
+    # Self-hosted: set OPEN_METEO_BASE_URL to your instance (e.g. http://localhost:8080).
+    # Self-hosted Open-Meteo (AGPLv3 engine) syncing ECMWF IFS 0.25° model.
+    # Covers Australia at ~25km resolution. CC-BY 4.0 data attribution.
     # ──────────────────────────────────────────────────────────────
     weather_algo_version: str = Field(
-        default="weather.v1.disabled",
+        default="weather.v2.openmeteo.ecmwf_ifs025",
         alias="WEATHER_ALGO_VERSION",
     )
     weather_cache_seconds: int = Field(default=3600, alias="WEATHER_CACHE_SECONDS")
     weather_sample_interval_km: float = Field(default=50.0, alias="WEATHER_SAMPLE_INTERVAL_KM")
+    open_meteo_base_url: str = Field(
+        default="https://api.open-meteo.com",
+        alias="OPEN_METEO_BASE_URL",
+    )
+    open_meteo_api_key: str = Field(
+        default="",
+        alias="OPEN_METEO_API_KEY",
+    )
 
     # ──────────────────────────────────────────────────────────────
     # Fuel overlay - NSW FuelCheck, WA FuelWatch, Open Charge Map

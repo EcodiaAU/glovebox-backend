@@ -34,6 +34,7 @@ from app.core.settings import settings
 from app.core.storage import get_heritage_pack, put_heritage_pack
 from app.core.time import utc_now_iso
 from app.core.geo import bbox_from_coords, decode_polyline6
+from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh, stable_key
 
 logger = logging.getLogger(__name__)
@@ -305,11 +306,7 @@ class Heritage:
         warnings: List[str] = []
 
         # ── Query all 4 endpoints concurrently ────────────────────
-        transport = httpx.AsyncHTTPTransport(retries=1)
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            transport=transport,
-        ) as client:
+        async with http_client() as client:
             results = await asyncio.gather(
                 _fetch_world_heritage(client, bbox, warnings),
                 _fetch_national_heritage(client, bbox, warnings),

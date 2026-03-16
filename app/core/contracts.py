@@ -350,6 +350,33 @@ class PlacesSuggestResponse(BaseModel):
     clusters: List[PlacesSuggestionCluster]
 
 
+class StopSuggestionsRequest(BaseModel):
+    """Request nearby POI suggestions for the trip stop list.
+
+    Uses the trip bounding box for Overpass queries, then scores candidates
+    by proximity to the route midpoint and category diversity vs existing stops.
+    """
+    bbox: BBox4                                   # bounding box of the full route
+    midpoint: NavCoord                            # geographic midpoint of the route
+    existing_categories: List[PlaceCategory] = Field(default_factory=list)
+    limit: int = 4                                # max suggestions to return
+
+
+class StopSuggestionItem(BaseModel):
+    """A single suggested place to add as a trip stop."""
+    id: str
+    name: str
+    lat: float
+    lng: float
+    category: PlaceCategory
+    score: float
+    extra: Dict[str, Any] = Field(default_factory=dict)
+
+
+class StopSuggestionsResponse(BaseModel):
+    suggestions: List[StopSuggestionItem]
+
+
 # ──────────────────────────────────────────────────────────────
 # Guide (LLM-driven companion)
 # ──────────────────────────────────────────────────────────────
@@ -1321,6 +1348,8 @@ class AggregatedObservation(BaseModel):
     first_reported_at: str
     last_reported_at: str
     reporters: int = 1               # distinct users
+    confidence: float = 0.5          # 0.0-1.0, higher = more trustworthy
+    is_recent: bool = False          # last report within 30 minutes
 
 
 class NearbyObservationsResponse(BaseModel):

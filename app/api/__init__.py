@@ -26,6 +26,7 @@ from .roadkill import router as roadkill_router
 from .presence import router as presence_router
 from .observations import router as observations_router
 from .peer_sync import router as peer_sync_router
+from .ai_trip import router as ai_trip_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -52,3 +53,4 @@ api_router.include_router(roadkill_router)
 api_router.include_router(presence_router)
 api_router.include_router(observations_router)
 api_router.include_router(peer_sync_router)
+api_router.include_router(ai_trip_router)

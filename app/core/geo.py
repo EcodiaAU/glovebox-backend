@@ -3,13 +3,14 @@
 Shared geospatial helpers used by overlay services.
 
 Centralises polyline6 decoding, haversine distance, route sampling,
-bounding-box calculation, and min-distance-to-route so each service
-doesn't carry its own copy.
+bounding-box calculation, min-distance-to-route, interpolated sampling,
+corridor filtering, and bbox-overlap checking so each service doesn't
+carry its own copy.
 """
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Re-export from the canonical polyline6 module so callers only need one import.
 from app.core.polyline6 import decode_polyline6, encode_polyline6  # noqa: F401
@@ -130,3 +131,135 @@ def bbox_from_coords(
         max(lats) + buf_lat,
         max(lngs) + buf_lng,
     )
+
+
+def bbox_overlaps(
+    min_lat: float, min_lng: float, max_lat: float, max_lng: float,
+    region_lat_min: float, region_lat_max: float,
+    region_lng_min: float, region_lng_max: float,
+) -> bool:
+    """Return True if two axis-aligned bounding boxes overlap."""
+    return (
+        min_lat <= region_lat_max
+        and max_lat >= region_lat_min
+        and min_lng <= region_lng_max
+        and max_lng >= region_lng_min
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Interpolated route sampling (used by air_quality, coverage, wildlife)
+# ──────────────────────────────────────────────────────────────
+
+def cumulative_distances(coords: List[Tuple[float, float]]) -> List[float]:
+    """Compute cumulative haversine distances along a coordinate list."""
+    dists = [0.0]
+    for i in range(1, len(coords)):
+        d = haversine_km(
+            (coords[i - 1][0], coords[i - 1][1]),
+            (coords[i][0], coords[i][1]),
+        )
+        dists.append(dists[-1] + d)
+    return dists
+
+
+def interpolated_samples(
+    coords: List[Tuple[float, float]],
+    cum_dists: List[float],
+    interval_km: float,
+) -> List[Tuple[float, float, float]]:
+    """
+    Sample every *interval_km* with linear interpolation between vertices.
+
+    Always includes the start and end points.
+    Returns [(lat, lng, km_along), ...].
+    """
+    total_km = cum_dists[-1]
+    if total_km == 0 or not coords:
+        return []
+
+    samples: List[Tuple[float, float, float]] = [(coords[0][0], coords[0][1], 0.0)]
+    target_km = interval_km
+    i = 0
+    while target_km < total_km:
+        while i < len(cum_dists) - 1 and cum_dists[i + 1] < target_km:
+            i += 1
+        if i >= len(coords) - 1:
+            break
+        seg_len = cum_dists[i + 1] - cum_dists[i]
+        frac = (target_km - cum_dists[i]) / seg_len if seg_len > 0 else 0.0
+        lat = coords[i][0] + frac * (coords[i + 1][0] - coords[i][0])
+        lng = coords[i][1] + frac * (coords[i + 1][1] - coords[i][1])
+        samples.append((lat, lng, target_km))
+        target_km += interval_km
+
+    last_lat, last_lng = coords[-1]
+    if not samples or haversine_km((samples[-1][0], samples[-1][1]), (last_lat, last_lng)) > 0.5:
+        samples.append((last_lat, last_lng, total_km))
+
+    return samples
+
+
+# ──────────────────────────────────────────────────────────────
+# min_dist_to_route with km_along (used by rest_areas)
+# ──────────────────────────────────────────────────────────────
+
+def min_dist_to_route_with_km(
+    lat: float,
+    lng: float,
+    samples: List[Tuple[float, float, float]],
+) -> Tuple[float, float]:
+    """
+    Minimum haversine distance (km) from (lat, lng) to any sample point,
+    also returning the km_along of that nearest sample.
+
+    *samples* must be (lat, lng, km_along) tuples.
+    Returns (distance_km, km_along).
+    """
+    best_dist = float("inf")
+    best_km = 0.0
+    pt = (lat, lng)
+    for s_lat, s_lng, s_km in samples:
+        d = haversine_km(pt, (s_lat, s_lng))
+        if d < best_dist:
+            best_dist = d
+            best_km = s_km
+        if d < 0.05:
+            break
+    return best_dist, best_km
+
+
+# ──────────────────────────────────────────────────────────────
+# Corridor filtering (filter items by distance from route)
+# ──────────────────────────────────────────────────────────────
+
+def filter_by_corridor(
+    items: List[Any],
+    route_samples: List[Tuple[float, float]],
+    buffer_km: float,
+    *,
+    lat_fn: Callable[[Any], float] = lambda x: x.lat,
+    lng_fn: Callable[[Any], float] = lambda x: x.lng,
+    set_distance: Callable[[Any, float], None] | None = None,
+) -> List[Any]:
+    """
+    Filter a list of items to those within *buffer_km* of the route.
+
+    Args:
+        items:          Objects to filter.
+        route_samples:  Sampled route as [(lat, lng), ...].
+        buffer_km:      Maximum distance from route.
+        lat_fn/lng_fn:  Accessors for lat/lng on each item.
+        set_distance:   Optional callback to stamp distance_from_route_km.
+
+    Returns:
+        Filtered list (order preserved).
+    """
+    filtered: List[Any] = []
+    for item in items:
+        dist = min_dist_to_route(lat_fn(item), lng_fn(item), route_samples)
+        if dist <= buffer_km:
+            if set_distance is not None:
+                set_distance(item, round(dist, 2))
+            filtered.append(item)
+    return filtered

@@ -11,6 +11,8 @@ from app.core.contracts import (
     CorridorPlacesRequest,
     PlacesSuggestRequest,
     PlacesSuggestResponse,
+    StopSuggestionsRequest,
+    StopSuggestionsResponse,
 )
 from app.core.errors import bad_request, not_found
 from app.services.places import Places
@@ -196,3 +198,27 @@ def places_suggest(
         limit_per_sample=int(req.limit_per_sample or 150),
     )
     return PlacesSuggestResponse(clusters=clusters)
+
+
+# ──────────────────────────────────────────────────────────────
+# /places/stop-suggestions
+# ──────────────────────────────────────────────────────────────
+
+@router.post("/stop-suggestions", response_model=StopSuggestionsResponse)
+def places_stop_suggestions(
+    req: StopSuggestionsRequest,
+    places: Places = Depends(get_places_service),
+) -> StopSuggestionsResponse:
+    """Return up to req.limit nearby POI suggestions for the trip stop list.
+
+    Queries Overpass within the trip bounding box, scores candidates by
+    proximity to the route midpoint and category diversity, returns top N.
+    """
+    midpoint = (req.midpoint.lat, req.midpoint.lng)
+    suggestions = places.suggest_stops(
+        bbox=req.bbox,
+        midpoint=midpoint,
+        existing_categories=req.existing_categories,
+        limit=max(1, min(8, req.limit)),
+    )
+    return StopSuggestionsResponse(suggestions=suggestions)
