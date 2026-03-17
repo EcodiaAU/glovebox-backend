@@ -141,7 +141,7 @@ _FACILITY_TAGS = [
 ]
 
 def _build_overpass_query(
-    min_lat: float, min_lng: float, max_lat: float, max_lng: float, timeout: int = 55
+    min_lat: float, min_lng: float, max_lat: float, max_lng: float,
 ) -> str:
     bbox = f"{min_lat},{min_lng},{max_lat},{max_lng}"
     filters = [
@@ -157,7 +157,8 @@ def _build_overpass_query(
         f'node["amenity"="toilets"]["near_highway"~".*"]({bbox});',
     ]
     union = "\n  ".join(filters)
-    return f"""[out:json][timeout:{timeout}];
+    ql_timeout = max(10, int(settings.overpass_timeout_s) - 10)
+    return f"""[out:json][timeout:{ql_timeout}][maxsize:16000000];
 (
   {union}
 );
@@ -733,10 +734,7 @@ class RestAreas:
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(samples, buffer_km)
 
         # Query Overpass
-        ql = _build_overpass_query(
-            min_lat, min_lng, max_lat, max_lng,
-            timeout=max(5, int(settings.overpass_timeout_s) - 5),
-        )
+        ql = _build_overpass_query(min_lat, min_lng, max_lat, max_lng)
 
         warnings: List[str] = []
         raw_areas: List[RestArea] = []

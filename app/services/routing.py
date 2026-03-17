@@ -4,7 +4,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+import math
+
 from app.core.contracts import (
+    AvoidZoneRequest,
     BBox4,
     NavLeg,
     NavManeuver,
@@ -12,6 +15,7 @@ from app.core.contracts import (
     NavRequest,
     NavRoute,
     NavStep,
+    RouteAlternates,
 )
 from app.core.errors import bad_request, service_unavailable
 from app.core.keying import route_key_from_request
@@ -141,6 +145,52 @@ def _parse_osrm_leg(
 
 
 # ──────────────────────────────────────────────────────────────
+# Route hazard scoring
+# ──────────────────────────────────────────────────────────────
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in km between two points."""
+    d_lat = math.radians(lat2 - lat1)
+    d_lng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(d_lng / 2) ** 2
+    )
+    return 2 * 6371 * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _score_route_against_zones(
+    route_pts: List[Tuple[float, float]],
+    zones: List[AvoidZoneRequest],
+    sample_every: int = 20,
+) -> float:
+    """
+    Score a route based on proximity to avoid zones.
+    Lower score = less hazard exposure = better.
+
+    Samples the route geometry every `sample_every` points and sums up
+    penalty for points within zone radii. Penalty is proportional to
+    proximity (closer = higher penalty).
+    """
+    if not zones or not route_pts:
+        return 0.0
+
+    total_penalty = 0.0
+    for idx in range(0, len(route_pts), sample_every):
+        lat, lng = route_pts[idx]
+        for z in zones:
+            d = _haversine_km(lat, lng, z.lat, z.lng)
+            if d < z.radius_km:
+                # Closer to centre = higher penalty
+                proximity = 1.0 - (d / z.radius_km)
+                total_penalty += proximity * 100.0
+
+    return total_penalty
+
+
+# ──────────────────────────────────────────────────────────────
 # Routing service
 # ──────────────────────────────────────────────────────────────
 
@@ -151,6 +201,48 @@ class Routing:
         self.algo_version = algo_version
         self.client = httpx.Client(timeout=30.0)
 
+    def _parse_osrm_route(
+        self,
+        osrm_route: Dict[str, Any],
+        req: NavRequest,
+        rkey_suffix: str = "",
+    ) -> Optional[NavRoute]:
+        """Parse a single OSRM route dict into a NavRoute."""
+        overview_poly6: str = osrm_route.get("geometry", "")
+        if not overview_poly6:
+            return None
+
+        overview_pts = decode_polyline6(overview_poly6)
+        bbox = _bbox_from_coords(overview_pts)
+
+        dist_m = int(round(float(osrm_route.get("distance") or 0)))
+        dur_s = int(round(float(osrm_route.get("duration") or 0)))
+
+        osrm_legs = osrm_route.get("legs") or []
+        legs_out: List[NavLeg] = []
+        for i, osrm_leg in enumerate(osrm_legs):
+            from_id = req.stops[i].id if i < len(req.stops) else None
+            to_id = req.stops[i + 1].id if i + 1 < len(req.stops) else None
+            legs_out.append(_parse_osrm_leg(osrm_leg, i, from_id, to_id))
+
+        req_dict: Dict[str, Any] = req.model_dump()
+        rkey = route_key_from_request(req_dict, self.algo_version)
+        if rkey_suffix:
+            rkey = f"{rkey}_{rkey_suffix}"
+
+        return NavRoute(
+            route_key=rkey,
+            profile=req.profile,
+            distance_m=dist_m,
+            duration_s=dur_s,
+            geometry=overview_poly6,
+            bbox=bbox,
+            legs=legs_out,
+            provider="osrm",
+            created_at=utc_now_iso(),
+            algo_version=self.algo_version,
+        )
+
     def route(self, req: NavRequest) -> NavPack:
         if len(req.stops) < 2:
             bad_request("bad_nav_request", "stops must contain at least 2 points")
@@ -158,13 +250,16 @@ class Routing:
         # OSRM expects lng,lat
         coords = ";".join([f"{s.lng},{s.lat}" for s in req.stops])
 
+        # Request alternatives when avoid zones are present so we can pick
+        # the route with least hazard exposure
+        has_avoid = bool(req.avoid_zones)
         url = f"{self.osrm_base_url}/route/v1/{self.osrm_profile}/{coords}"
         params = {
             "overview": "full",
-            "geometries": "polyline6",      # ← native polyline6, no GeoJSON conversion
+            "geometries": "polyline6",
             "steps": "true",
             "annotations": "distance,duration,speed",
-            "alternatives": "false",
+            "alternatives": "3" if has_avoid else "false",
         }
 
         try:
@@ -183,43 +278,46 @@ class Routing:
         if not routes:
             service_unavailable("osrm_no_routes", "OSRM returned no routes")
 
-        best = routes[0]
+        # Parse all candidate routes
+        candidates: List[NavRoute] = []
+        for i, osrm_route in enumerate(routes):
+            parsed = self._parse_osrm_route(
+                osrm_route, req, rkey_suffix=f"alt{i}" if i > 0 else "",
+            )
+            if parsed:
+                candidates.append(parsed)
 
-        # Overview geometry - already polyline6 from OSRM
-        overview_poly6: str = best.get("geometry", "")
-        if not overview_poly6:
-            service_unavailable("osrm_bad_geometry", "OSRM returned empty geometry")
+        if not candidates:
+            service_unavailable("osrm_bad_geometry", "OSRM returned no usable routes")
 
-        # Decode overview for bbox computation
-        overview_pts = decode_polyline6(overview_poly6)
-        bbox = _bbox_from_coords(overview_pts)
+        # If avoid zones are present, score each route and pick the safest one
+        # that doesn't add too much distance
+        if has_avoid and len(candidates) > 1:
+            base_dist = candidates[0].distance_m
+            scored: List[Tuple[float, int, NavRoute]] = []
 
-        dist_m = int(round(float(best.get("distance") or 0)))
-        dur_s = int(round(float(best.get("duration") or 0)))
+            for idx, c in enumerate(candidates):
+                pts = decode_polyline6(c.geometry)
+                hazard_score = _score_route_against_zones(pts, req.avoid_zones)
 
-        # Parse legs with full step data
-        osrm_legs = best.get("legs") or []
-        legs_out: List[NavLeg] = []
-        for i, osrm_leg in enumerate(osrm_legs):
-            from_id = req.stops[i].id if i < len(req.stops) else None
-            to_id = req.stops[i + 1].id if i + 1 < len(req.stops) else None
-            legs_out.append(_parse_osrm_leg(osrm_leg, i, from_id, to_id))
+                # Penalize routes that are significantly longer (>50% more distance)
+                dist_ratio = c.distance_m / max(1, base_dist)
+                distance_penalty = max(0, (dist_ratio - 1.0) * 200)
 
-        # Route key from deterministic request hash
-        req_dict: Dict[str, Any] = req.model_dump()
-        rkey = route_key_from_request(req_dict, self.algo_version)
+                # Combined score: lower is better
+                # Hazard score heavily weighted — safety over speed
+                total = hazard_score + distance_penalty
+                scored.append((total, idx, c))
 
-        primary = NavRoute(
-            route_key=rkey,
-            profile=req.profile,
-            distance_m=dist_m,
-            duration_s=dur_s,
-            geometry=overview_poly6,
-            bbox=bbox,
-            legs=legs_out,
-            provider="osrm",
-            created_at=utc_now_iso(),
-            algo_version=self.algo_version,
+            scored.sort(key=lambda x: x[0])
+            primary = scored[0][2]
+            alternates = [s[2] for s in scored[1:]]
+        else:
+            primary = candidates[0]
+            alternates = candidates[1:] if len(candidates) > 1 else []
+
+        return NavPack(
+            req=req,
+            primary=primary,
+            alternates=RouteAlternates(alternates=alternates),
         )
-
-        return NavPack(req=req, primary=primary)

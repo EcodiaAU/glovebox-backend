@@ -734,6 +734,7 @@ class Flood:
                 follow_redirects=True,
                 transport=transport,
                 timeout=httpx.Timeout(90.0),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; roam-backend/1.0)"},
             ) as client:
                 stations = await _fetch_station_list(client)
             if stations:

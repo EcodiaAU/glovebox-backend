@@ -28,7 +28,8 @@ You are a local trip planner. When given a vibe description, return ONLY a JSON 
 }
 
 Rules:
-- 3 to 6 stops, ordered as a sensible route (start to end)
+- Include as many stops as the trip naturally calls for — there is NO upper limit. A weekend city trip might have 4–6 stops, but a multi-day road trip or scenic route can easily have 15–40+ stops. Let the distance, duration, and vibe dictate the count. MORE stops is almost always better — travellers want a rich, detailed itinerary, not a sparse skeleton.
+- Order stops as a sensible driving/riding route from start to end
 - Use real place names with accurate coordinates
 - Avoid generic tourist traps unless the vibe explicitly asks for them
 - Reason must be specific to the vibe, not generic
@@ -41,7 +42,7 @@ class AiTripService:
         self._api_key = settings.deepseek_api_key
         self._model = settings.deepseek_model
         self._base = settings.deepseek_base_url.rstrip("/")
-        self._timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+        self._timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
     async def generate(self, vibe: str) -> Dict[str, Any]:
         if not self._api_key:
@@ -55,7 +56,7 @@ class AiTripService:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.9,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
         }
         url = f"{self._base}/chat/completions"
         headers = {

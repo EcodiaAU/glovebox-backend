@@ -72,11 +72,19 @@ class NavStep(BaseModel):
 # Navigation - Core route models
 # ──────────────────────────────────────────────────────────────
 
+class AvoidZoneRequest(BaseModel):
+    """A circular zone the router should try to avoid."""
+    lat: float
+    lng: float
+    radius_km: float = 5.0
+
+
 class NavRequest(BaseModel):
     profile: str = "drive"
     prefs: Dict[str, Any] = Field(default_factory=dict)
     stops: List[TripStop]
     avoid: List[str] = Field(default_factory=list)
+    avoid_zones: List[AvoidZoneRequest] = Field(default_factory=list)
     depart_at: Optional[str] = None  # ISO8601 UTC recommended
 
 

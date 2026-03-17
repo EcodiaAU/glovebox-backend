@@ -148,6 +148,12 @@ class PlacesStore:
 
     def ensure_schema(self) -> None:
         self.conn.executescript(_SCHEMA_SQL)
+        # Incremental migration: add wikidata_enriched_at if absent
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(places_items)").fetchall()}
+        if "wikidata_enriched_at" not in cols:
+            self.conn.execute(
+                "ALTER TABLE places_items ADD COLUMN wikidata_enriched_at TEXT"
+            )
         self.conn.commit()
 
     # ──────────────────────────────────────────────────────────────
@@ -348,3 +354,104 @@ class PlacesStore:
     ) -> list[tuple[str, BBox4]]:
         tiles = _iter_tiles(bbox, step_deg=step_deg, max_tiles=max_tiles)
         return [(_tile_key(step_deg, t), t) for t in tiles]
+
+    # ──────────────────────────────────────────────────────────────
+    # Wikidata enrichment
+    # ──────────────────────────────────────────────────────────────
+
+    def query_wikidata_candidates(
+        self,
+        *,
+        categories: tuple[str, ...] = ("camp", "caravan_site", "national_park",
+                                        "heritage", "viewpoint", "attraction",
+                                        "museum", "waterfall", "swimming_hole"),
+        stale_days: int = 30,
+        limit: int = 200,
+    ) -> list[tuple[str, int, dict]]:
+        """
+        Return (osm_type, osm_id, tags) for places that:
+          - belong to an enrichable category
+          - have a `wikidata` key in tags_json
+          - have not been wikidata-enriched recently (or never)
+
+        Returns at most `limit` rows, oldest-enriched first.
+        """
+        cats_ph = ",".join("?" for _ in categories)
+        sql = f"""
+        SELECT osm_type, osm_id, tags_json
+        FROM places_items
+        WHERE category IN ({cats_ph})
+          AND tags_json LIKE '%"wikidata"%'
+          AND (
+            wikidata_enriched_at IS NULL
+            OR wikidata_enriched_at < datetime('now', '-{int(stale_days)} days')
+          )
+        ORDER BY wikidata_enriched_at ASC NULLS FIRST
+        LIMIT {int(limit)}
+        """
+        rows = self.conn.execute(sql, list(categories)).fetchall()
+        result = []
+        for osm_type, osm_id, tags_json in rows:
+            try:
+                tags = orjson.loads(tags_json) if tags_json else {}
+            except Exception:
+                tags = {}
+            result.append((osm_type, osm_id, tags))
+        return result
+
+    def apply_wikidata_enrichment(
+        self,
+        osm_type: str,
+        osm_id: int,
+        *,
+        thumbnail_url: Optional[str],
+        image_licence: Optional[str],
+        image_attribution: Optional[str],
+        website: Optional[str],
+    ) -> None:
+        """
+        Merge Wikidata-sourced fields into the existing tags_json for a place,
+        then stamp wikidata_enriched_at.
+
+        Only sets fields that are not already present (OSM tags take priority).
+        """
+        row = self.conn.execute(
+            "SELECT tags_json FROM places_items WHERE osm_type=? AND osm_id=?",
+            (osm_type, osm_id),
+        ).fetchone()
+        if not row:
+            return
+
+        try:
+            tags = orjson.loads(row[0]) if row[0] else {}
+        except Exception:
+            tags = {}
+
+        changed = False
+        if thumbnail_url and not tags.get("thumbnail_url"):
+            tags["thumbnail_url"]     = thumbnail_url
+            tags["thumbnail_licence"] = image_licence or ""
+            tags["thumbnail_attribution"] = image_attribution or ""
+            changed = True
+        if website and not tags.get("website"):
+            tags["website"]           = str(website)[:300]
+            tags["website_source"]    = "wikidata"
+            changed = True
+
+        now = _now_iso()
+        if changed:
+            self.conn.execute(
+                """
+                UPDATE places_items
+                SET tags_json=?, wikidata_enriched_at=?
+                WHERE osm_type=? AND osm_id=?
+                """,
+                (orjson.dumps(tags), now, osm_type, osm_id),
+            )
+        else:
+            # Still stamp so we don't re-query this item next time
+            self.conn.execute(
+                "UPDATE places_items SET wikidata_enriched_at=? WHERE osm_type=? AND osm_id=?",
+                (now, osm_type, osm_id),
+            )
+        self.conn.commit()

@@ -38,11 +38,11 @@ class Settings(BaseSettings):
     overpass_fallback_urls: list[str] = Field(
         default=[
             "https://overpass.kumi.systems/api/interpreter",
-            "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter",
         ],
         alias="OVERPASS_FALLBACK_URLS",
     )
-    overpass_timeout_s: int = Field(default=60, alias="OVERPASS_TIMEOUT_S")
+    overpass_timeout_s: int = Field(default=90, alias="OVERPASS_TIMEOUT_S")
     overpass_throttle_s: float = Field(default=0.2, alias="OVERPASS_THROTTLE_S")
     overpass_retries: int = Field(default=4, alias="OVERPASS_RETRIES")
     overpass_retry_base_s: float = Field(default=0.75, alias="OVERPASS_RETRY_BASE_S")

@@ -20,7 +20,7 @@ def _get_svc() -> AiTripService:
 
 
 class AiTripRequest(BaseModel):
-    vibe: str = Field(..., min_length=3, max_length=500)
+    vibe: str = Field(..., min_length=3, max_length=1000)
 
 
 class AiTripStop(BaseModel):

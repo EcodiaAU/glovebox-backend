@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
+import asyncio
 import collections
 import concurrent.futures
 import hashlib
@@ -19,6 +20,7 @@ from app.core.time import utc_now_iso
 from app.core.storage import get_places_pack, put_places_pack
 from app.core.settings import settings
 from app.core.polyline6 import decode_polyline6
+from app.core.http_client import http_client
 
 from app.services.places_store import PlacesStore
 from app.services.places_supa import SupaPlacesRepo
@@ -1512,12 +1514,79 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
         extra["wheelchair"] = wc
 
     # Stars / rating (some OSM entries have tourism:stars)
-    stars = tags.get("stars") or tags.get("tourism:stars")
+    stars = tags.get("stars") or tags.get("tourism:stars") or tags.get("accommodation:stars")
     if stars:
         try:
             extra["stars"] = int(stars)
         except (ValueError, TypeError):
             pass
+
+    # ── Elevation ─────────────────────────────────────────────
+    # Useful for viewpoints, peaks, hiking trailheads
+    ele = tags.get("ele")
+    if ele:
+        try:
+            extra["elevation_m"] = round(float(str(ele).replace("m", "").strip()), 1)
+        except (ValueError, TypeError):
+            pass
+
+    # ── Short description / blurb ─────────────────────────────
+    # OSM AU mappers often add short_description as a one-liner
+    sd = tags.get("short_description") or tags.get("description:en")
+    if sd and not extra.get("description"):
+        extra["description"] = str(sd)[:300]
+    elif sd:
+        extra["short_description"] = str(sd)[:300]
+
+    # ── Contact email ─────────────────────────────────────────
+    email = tags.get("email") or tags.get("contact:email")
+    if email:
+        extra["email"] = str(email)[:200]
+
+    # ── Cuisine & dietary options ─────────────────────────────
+    # Relevant for restaurants, cafes, pubs
+    if category in ("restaurant", "cafe", "fast_food", "pub", "bar", "bakery"):
+        cuisine = tags.get("cuisine")
+        if cuisine:
+            extra["cuisine"] = str(cuisine)[:100]
+        diets = []
+        for d in ("vegan", "vegetarian", "gluten_free", "halal", "kosher"):
+            if tags.get(f"diet:{d}") in ("yes", "only"):
+                diets.append(d)
+        if diets:
+            extra["diets"] = diets
+
+    # ── Mapillary street-level photo ──────────────────────────
+    # Sequence/image ID — client resolves to thumb at
+    # https://graph.mapillary.com/{id}?fields=thumb_1024_url&access_token=...
+    # Stored offline as fallback when wikimedia thumb is absent
+    mapillary = tags.get("mapillary")
+    if mapillary and not extra.get("thumbnail_url"):
+        extra["mapillary_id"] = str(mapillary)[:64]
+
+    # ── Brand Wikidata ────────────────────────────────────────
+    # Lets client resolve brand logo without extra API call
+    bwd = tags.get("brand:wikidata")
+    if bwd and isinstance(bwd, str) and bwd.startswith("Q"):
+        extra["brand_wikidata"] = str(bwd)[:20]
+
+    # ── Heritage details ──────────────────────────────────────
+    if category == "heritage":
+        hr = tags.get("heritage:ref") or tags.get("ref:nrhp") or tags.get("ref:whc")
+        if hr:
+            extra["heritage_ref"] = str(hr)[:80]
+        operator = tags.get("heritage:operator") or tags.get("owner")
+        if operator:
+            extra["heritage_operator"] = str(operator)[:100]
+        hstate = tags.get("heritage")
+        if hstate:
+            extra["heritage_level"] = str(hstate)[:40]
+
+    # ── Sport / activity type ─────────────────────────────────
+    # Already used for category inference but useful to surface to users
+    sport = tags.get("sport")
+    if sport and category in ("fishing", "surf", "hiking", "swimming_hole", "golf", "pool"):
+        extra["sport"] = str(sport)[:80]
 
     return PlaceItem(
         id=f"osm:{osm_type}:{osm_id}",
@@ -1554,7 +1623,7 @@ def _build_overpass_ql(*, bbox: BBox4, filters: List[str], name_clause: str) -> 
     http_timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
     ql_timeout_s = max(10, http_timeout_s - 10)
     return (
-        f'[out:json][timeout:{ql_timeout_s}];'
+        f'[out:json][timeout:{ql_timeout_s}][maxsize:16000000];'
         f'('
         f'{"".join(parts)}'
         f');'
@@ -1604,7 +1673,7 @@ def _build_overpass_around_ql(
     # us getting a raw ReadTimeout.
     ql_timeout_s = max(10, http_timeout_s - 10)
     return (
-        f"[out:json][timeout:{ql_timeout_s}];"
+        f"[out:json][timeout:{ql_timeout_s}][maxsize:16000000];"
         f"("
         f"{''.join(parts)}"
         f");"
@@ -1862,6 +1931,20 @@ def _score_place(
             score += 1.0
         elif len(fuel_types) >= 1:
             score += 0.5
+
+    # 7. Elevation data — viewpoints/peaks with known elevation are more notable
+    if extra.get("elevation_m") and item.category in ("viewpoint", "hiking", "national_park"):
+        score += 0.5
+
+    # 8. Cuisine info — restaurants with cuisine tags are better documented
+    if extra.get("cuisine"):
+        score += 0.3
+    if extra.get("diets"):
+        score += 0.2
+
+    # 9. Photo availability (mapillary as fallback)
+    if extra.get("thumbnail_url") or extra.get("mapillary_id"):
+        score += 0.5
 
     return score
 
@@ -2272,6 +2355,81 @@ def _corridor_diversify(
 
 
 # ──────────────────────────────────────────────────────────────
+# Wikidata background enrichment
+# ──────────────────────────────────────────────────────────────
+
+async def _wikidata_enrich_store(store: PlacesStore) -> None:
+    """
+    Background task: fetch Wikidata P18 (image) + P856 (website) for any
+    camp/caravan/heritage/viewpoint places in the store that have a `wikidata`
+    OSM tag but haven't been enriched yet (or are stale > 30 days).
+
+    Runs silently — all errors are logged and swallowed so the calling
+    request is never affected.
+    """
+    from app.core.wikidata import enrich_qids
+
+    try:
+        candidates = store.query_wikidata_candidates()
+    except Exception as exc:
+        logger.warning("[wikidata_enrich] query_candidates failed: %s", exc)
+        return
+
+    if not candidates:
+        return
+
+    # Build Q-ID → (osm_type, osm_id) map
+    qid_map: dict[str, tuple[str, int]] = {}
+    for osm_type, osm_id, tags in candidates:
+        qid = tags.get("wikidata", "")
+        if qid and isinstance(qid, str) and qid.startswith("Q"):
+            qid_map[qid] = (osm_type, osm_id)
+
+    if not qid_map:
+        return
+
+    logger.info("[wikidata_enrich] enriching %d places", len(qid_map))
+
+    try:
+        async with http_client(timeout=15.0) as client:
+            enrichments = await enrich_qids(list(qid_map.keys()), client=client)
+    except Exception as exc:
+        logger.warning("[wikidata_enrich] API call failed: %s", exc)
+        return
+
+    enriched = 0
+    for qid, result in enrichments.items():
+        osm_type, osm_id = qid_map[qid]
+        try:
+            store.apply_wikidata_enrichment(
+                osm_type, osm_id,
+                thumbnail_url=result.thumbnail_url,
+                image_licence=result.image_licence,
+                image_attribution=result.image_attribution,
+                website=result.website,
+            )
+            if result.thumbnail_url or result.website:
+                enriched += 1
+        except Exception as exc:
+            logger.warning("[wikidata_enrich] apply failed %s/%s: %s", osm_type, osm_id, exc)
+
+    # Stamp any Q-IDs that had no result so we don't retry them immediately
+    for qid, (osm_type, osm_id) in qid_map.items():
+        if qid not in enrichments:
+            try:
+                store.apply_wikidata_enrichment(
+                    osm_type, osm_id,
+                    thumbnail_url=None, image_licence=None,
+                    image_attribution=None, website=None,
+                )
+            except Exception:
+                pass
+
+    logger.info("[wikidata_enrich] done: %d/%d places enriched with image/website",
+                enriched, len(qid_map))
+
+
+# ──────────────────────────────────────────────────────────────
 # Service
 # ──────────────────────────────────────────────────────────────
 
@@ -2565,6 +2723,7 @@ class Places:
             except Exception as e:
                 logger.warning("search_bundle store upsert FAILED: %r", e)
             self._supa_upsert_best_effort(all_fetched, source="bundle_overpass")
+            asyncio.create_task(_wikidata_enrich_store(self.store))
 
         # ── Resolve regional landmarks for scoring ────────────
         landmark_names = _landmarks_for_route(samples)
@@ -2936,6 +3095,7 @@ class Places:
                 self.store.upsert_items(fetched)
             except Exception as e:
                 logger.warning("corridor places_store upsert FAILED: %r", e)
+            asyncio.create_task(_wikidata_enrich_store(self.store))
 
             # Publish to supa (best-effort)
             self._supa_upsert_best_effort(fetched, source="overpass_corridor")
@@ -3183,6 +3343,7 @@ class Places:
                         self.store.upsert_items(fetched_items)
                     except Exception as e:
                         logger.warning("PlacesStore.upsert_items FAILED: %r", e)
+                    asyncio.create_task(_wikidata_enrich_store(self.store))
 
                     total_supa_published += self._supa_upsert_best_effort(
                         fetched_items,
@@ -3336,19 +3497,36 @@ class Places:
             # Fallback: just use high-value categories
             candidates = ["viewpoint", "waterfall", "beach", "national_park", "camp"]
 
-        # ── 2. Overpass bbox query ────────────────────────────────────────
-        filters = _overpass_filters_for_categories(candidates)
-        ql = _build_overpass_ql(bbox=bbox, filters=filters, name_clause="")
+        # ── 2. Overpass bbox query (two parallel chunks) ──────────────────
+        # Split candidates into two groups so both can be fetched concurrently,
+        # roughly halving wall-clock time for large bboxes.
+        split = len(candidates) // 2 or len(candidates)
+        chunks = [candidates[:split], candidates[split:]] if len(candidates) > split else [candidates]
+        candidate_set = {str(c) for c in candidates}
 
-        items: List[PlaceItem] = []
-        try:
-            data = _fetch_overpass_with_retries(client=None, ql=ql, label="suggest_stops")  # type: ignore[arg-type]
+        def _fetch_chunk(chunk: List[PlaceCategory]) -> List[PlaceItem]:
+            f = _overpass_filters_for_categories(chunk)
+            q = _build_overpass_ql(bbox=bbox, filters=f, name_clause="")
+            data = _fetch_overpass_with_retries(client=None, ql=q, label="suggest_stops")  # type: ignore[arg-type]
+            out: List[PlaceItem] = []
             for el in data.get("elements", []):
                 item = _element_to_item(el)
-                if item and str(item.category) in {str(c) for c in candidates}:
-                    items.append(item)
-        except Exception as exc:
-            logger.warning("suggest_stops overpass failed: %s", exc)
+                if item and str(item.category) in candidate_set:
+                    out.append(item)
+            return out
+
+        items: List[PlaceItem] = []
+        all_failed = True
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [pool.submit(_fetch_chunk, chunk) for chunk in chunks]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    items.extend(fut.result())
+                    all_failed = False
+                except Exception as exc:
+                    logger.warning("suggest_stops overpass chunk failed: %s", exc)
+
+        if all_failed:
             return []
 
         if not items:
