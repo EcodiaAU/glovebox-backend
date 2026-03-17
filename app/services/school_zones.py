@@ -264,8 +264,23 @@ class SchoolZones:
 
         route_samples = sample_route(coords, interval_km=2.0)
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(coords, buffer_km)
-        is_active, active_session = _check_active_now()
         warnings: List[str] = []
+
+        # NSW-only data source — skip fetch for routes entirely outside NSW
+        _NSW_LAT_MIN, _NSW_LAT_MAX = -37.6, -27.5
+        _NSW_LNG_MIN, _NSW_LNG_MAX = 140.5, 154.0
+        if max_lat < _NSW_LAT_MIN or min_lat > _NSW_LAT_MAX or max_lng < _NSW_LNG_MIN or min_lng > _NSW_LNG_MAX:
+            overlay = SchoolZonesOverlay(
+                school_zones_key=zones_key,
+                polyline6=polyline6,
+                algo_version=_ALGO_VERSION,
+                created_at=utc_now_iso(),
+                warnings=["Route does not pass through NSW — school zone data not available outside NSW."],
+            )
+            put_school_zones_pack(self.conn, school_zones_key=zones_key, created_at=overlay.created_at, algo_version=_ALGO_VERSION, pack=overlay.model_dump())
+            return overlay
+
+        is_active, active_session = _check_active_now()
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client:
             zones = await _fetch_nsw_school_zones(

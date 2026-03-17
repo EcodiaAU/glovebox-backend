@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import List
 
@@ -70,6 +71,8 @@ def _confidence(elapsed_s: float) -> str:
 
 
 class Presence:
+    _lock = threading.Lock()
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
@@ -83,14 +86,15 @@ class Presence:
         heading_deg: float,
     ) -> None:
         """Upsert the user's latest known position."""
-        upsert_presence(
-            self.conn,
-            user_id=user_id,
-            lat=lat, lng=lng,
-            speed_kmh=speed_kmh,
-            heading_deg=heading_deg,
-            pinged_at=utc_now_iso(),
-        )
+        with self._lock:
+            upsert_presence(
+                self.conn,
+                user_id=user_id,
+                lat=lat, lng=lng,
+                speed_kmh=speed_kmh,
+                heading_deg=heading_deg,
+                pinged_at=utc_now_iso(),
+            )
 
     def nearby(
         self,
@@ -105,11 +109,12 @@ class Presence:
         Projects each ping forward using dead-reckoning.
         """
         now = datetime.now(timezone.utc)
-        rows = get_nearby_presence(
-            self.conn, lat=lat, lng=lng,
-            exclude_user_id=user_id,
-            max_age_hours=4.0,
-        )
+        with self._lock:
+            rows = get_nearby_presence(
+                self.conn, lat=lat, lng=lng,
+                exclude_user_id=user_id,
+                max_age_hours=4.0,
+            )
 
         results: list[NearbyRoamer] = []
         for r in rows:

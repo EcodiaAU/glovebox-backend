@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import math
 import time
+import uuid
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -79,45 +82,80 @@ def _expand_bbox(bbox: BBox4, km: float) -> BBox4:
 
 
 # ══════════════════════════════════════════════════════════════
-# NSW + TAS FuelCheck provider (V2 API)
+# NSW + TAS FuelCheck provider (V2 API — OneGov gateway)
 # ══════════════════════════════════════════════════════════════
-# Official NSW API Gateway - registered product at:
-# https://api.nsw.gov.au/Product/Index/22
+# Migrated from api.nsw.gov.au (dead, returns 404 since ~2025) to
+# api.onegov.nsw.gov.au.  Swagger spec at:
+#   https://apinsw.onegov.nsw.gov.au/api/swagger/spec/22
 #
-# V2 endpoints cover BOTH NSW and Tasmania (FuelCheck TAS launched
-# on the same api.nsw.gov.au platform). Same auth, same data format.
+# V2 endpoints cover BOTH NSW and Tasmania.
 #
-# Auth: Three-part auth supplied by the API Gateway:
-#   - apikey header (NSW_FUEL_API_KEY)
-#   - Authorization header (NSW_FUEL_AUTH_HEADER) — typically "Basic <base64(key:secret)>"
-#   - The secret (NSW_FUEL_API_SECRET) is used to construct the Authorization header
-#       if NSW_FUEL_AUTH_HEADER is not set directly.
+# Auth: OAuth2 client_credentials flow:
+#   1. POST /oauth/client_credential/accesstoken?grant_type=client_credentials
+#      with header Authorization: Basic base64(api_key:api_secret)
+#      → returns { "access_token": "...", "expires_in": "..." }
+#   2. Subsequent calls send:
+#      - Authorization: Bearer {access_token}
+#      - apikey: {api_key}
+#      - transactionid: {uuid}
+#      - requesttimestamp: {dd/MM/yyyy hh:mm:ss AM/PM} (UTC)
+#      - Content-Type: application/json; charset=utf-8
 #
-# Endpoint used: GET /fuelpricecheck/v2/fuel/prices/bylocation
-#   ?latitude=<lat>&longitude=<lng>&radius=<km>
-#
-# Falls back to /fuelpricecheck/v2/fuel/prices/new if the location endpoint
-# is unavailable, which returns all current prices and requires bbox filtering.
+# V2 price endpoints:
+#   POST /FuelPriceCheck/v2/fuel/prices/nearby   (body: {fueltype, latitude, longitude, radius, sortby, sortascending})
+#   GET  /FuelPriceCheck/v2/fuel/prices/new       (all new prices)
+#   GET  /FuelPriceCheck/v2/fuel/prices            (all current prices)
 # ══════════════════════════════════════════════════════════════
 
-_NSW_BASE = "https://api.nsw.gov.au/FuelPriceCheck/v2"
-_NSW_BYLOCATION = f"{_NSW_BASE}/fuel/prices/bylocation"
-_NSW_ALL_PRICES  = f"{_NSW_BASE}/fuel/prices/new"
-_NSW_STATIONS    = f"{_NSW_BASE}/fuel/stations"
+_nsw_log = logging.getLogger(__name__)
+
+# Module-level token cache — simple, sufficient for a single-process server.
+_nsw_token_cache: Dict[str, Any] = {"token": None, "expires_at": 0.0}
 
 
-def _nsw_headers() -> Dict[str, str]:
-    hdrs: Dict[str, str] = {
-        "Content-Type": "application/json",
-        "accept": "application/json",
+async def _nsw_get_bearer_token(client: httpx.AsyncClient, warnings: List[str]) -> Optional[str]:
+    """Obtain an OAuth2 Bearer token from the OneGov gateway, with simple caching."""
+    now = time.time()
+    if _nsw_token_cache["token"] and now < _nsw_token_cache["expires_at"] - 30:
+        return _nsw_token_cache["token"]
+
+    base = settings.nsw_fuel_base_url.rstrip("/")
+    url = f"{base}/oauth/client_credential/accesstoken"
+    cred = f"{settings.nsw_fuel_api_key}:{settings.nsw_fuel_api_secret}"
+    auth_header = "Basic " + base64.b64encode(cred.encode()).decode()
+
+    try:
+        resp = await client.post(
+            url,
+            params={"grant_type": "client_credentials"},
+            headers={"Authorization": auth_header},
+        )
+        if resp.status_code != 200:
+            warnings.append(f"nsw_fuel oauth HTTP {resp.status_code}")
+            _nsw_log.warning("nsw_fuel oauth token failed: HTTP %s — %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        token = data.get("access_token")
+        expires_in = int(data.get("expires_in", 1800))
+        _nsw_token_cache["token"] = token
+        _nsw_token_cache["expires_at"] = now + expires_in
+        return token
+    except Exception as e:
+        warnings.append(f"nsw_fuel oauth error: {e}")
+        return None
+
+
+def _nsw_api_headers(token: str) -> Dict[str, str]:
+    """Build request headers for an authenticated FuelCheck V2 call."""
+    now_utc = datetime.now(timezone.utc)
+    return {
+        "Authorization": f"Bearer {token}",
         "apikey": settings.nsw_fuel_api_key,
+        "transactionid": str(uuid.uuid4()),
+        "requesttimestamp": now_utc.strftime("%d/%m/%Y %I:%M:%S %p"),
+        "Content-Type": "application/json; charset=utf-8",
+        "accept": "application/json",
     }
-    if settings.nsw_fuel_auth_header:
-        hdrs["Authorization"] = settings.nsw_fuel_auth_header
-    elif settings.nsw_fuel_api_key and settings.nsw_fuel_api_secret:
-        raw = f"{settings.nsw_fuel_api_key}:{settings.nsw_fuel_api_secret}"
-        hdrs["Authorization"] = "Basic " + base64.b64encode(raw.encode()).decode()
-    return hdrs
 
 
 async def _fetch_nsw_fuel(
@@ -127,20 +165,23 @@ async def _fetch_nsw_fuel(
     warnings: List[str],
 ) -> Tuple[List[FuelStation], Dict[str, Any]]:
     """
-    Fetch NSW FuelCheck data for a bbox.
+    Fetch NSW FuelCheck V2 data via the OneGov gateway.
 
     Strategy:
-    1. Try /fuel/prices/bylocation with centre + radius derived from bbox.
-    2. If that fails, fall back to /fuel/prices/new (all NSW prices) + bbox filter.
-
-    Returns (stations, raw_stations_by_id) where raw_stations_by_id is keyed by
-    station code for dedup purposes.
+    1. Obtain a Bearer token (cached).
+    2. POST /FuelPriceCheck/v2/fuel/prices/nearby with centre + radius.
+    3. If that fails, GET /FuelPriceCheck/v2/fuel/prices/new + bbox filter.
     """
-    if not settings.nsw_fuel_enabled or not settings.nsw_fuel_api_key:
+    if not settings.nsw_fuel_enabled or not settings.nsw_fuel_api_key or not settings.nsw_fuel_api_secret:
         return [], {}
 
-    hdrs = _nsw_headers()
-    # Derive centre + radius from bbox
+    token = await _nsw_get_bearer_token(client, warnings)
+    if not token:
+        return [], {}
+
+    base = settings.nsw_fuel_base_url.rstrip("/")
+    hdrs = _nsw_api_headers(token)
+
     centre_lat = (bbox.minLat + bbox.maxLat) / 2
     centre_lng = (bbox.minLng + bbox.maxLng) / 2
     half_diag = haversine_km((bbox.minLat, bbox.minLng), (bbox.maxLat, bbox.maxLng)) / 2
@@ -149,14 +190,18 @@ async def _fetch_nsw_fuel(
     stations: List[FuelStation] = []
     raw_by_id: Dict[str, Any] = {}
 
+    # Try nearby (POST with JSON body)
     try:
-        resp = await client.get(
-            _NSW_BYLOCATION,
+        resp = await client.post(
+            f"{base}/FuelPriceCheck/v2/fuel/prices/nearby",
             headers=hdrs,
-            params={
+            json={
+                "fueltype": "All",
                 "latitude": str(centre_lat),
                 "longitude": str(centre_lng),
                 "radius": str(int(radius_km)),
+                "sortby": "Price",
+                "sortascending": "true",
             },
         )
         if resp.status_code == 200:
@@ -164,29 +209,24 @@ async def _fetch_nsw_fuel(
             stations, raw_by_id = _parse_nsw_bylocation(data, bbox=bbox)
             return stations, raw_by_id
         else:
-            warnings.append(f"nsw_fuel bylocation HTTP {resp.status_code}, falling back to /new")
+            warnings.append(f"nsw_fuel nearby HTTP {resp.status_code}, falling back to /prices/new")
     except Exception as e:
-        warnings.append(f"nsw_fuel bylocation error: {e}, falling back to /new")
+        warnings.append(f"nsw_fuel nearby error: {e}, falling back to /prices/new")
 
-    # Fallback: fetch all prices and filter by bbox
+    # Fallback: GET all new prices + filter by bbox
     try:
-        # Fetch station list and prices in parallel
-        s_resp, p_resp = await asyncio.gather(
-            client.get(_NSW_STATIONS, headers=hdrs),
-            client.get(_NSW_ALL_PRICES, headers=hdrs),
-            return_exceptions=True,
-        )
-        if isinstance(s_resp, Exception) or isinstance(p_resp, Exception):
-            raise Exception(f"nsw_fuel fallback request failed: {s_resp!r} / {p_resp!r}")
-        if s_resp.status_code != 200 or p_resp.status_code != 200:
-            warnings.append(f"nsw_fuel fallback HTTP {s_resp.status_code}/{p_resp.status_code}")
+        hdrs2 = _nsw_api_headers(token)  # fresh transactionid
+        resp = await client.get(f"{base}/FuelPriceCheck/v2/fuel/prices/new", headers=hdrs2)
+        if resp.status_code != 200:
+            warnings.append(f"nsw_fuel prices/new HTTP {resp.status_code}")
             return [], {}
-
-        station_list = s_resp.json().get("stations", [])
-        price_list = p_resp.json().get("prices", [])
+        data = resp.json()
+        # /prices/new returns {"stations": [...], "prices": [...]}
+        station_list = data.get("stations", [])
+        price_list = data.get("prices", [])
         stations, raw_by_id = _parse_nsw_fallback(station_list, price_list, bbox=bbox)
     except Exception as e:
-        warnings.append(f"nsw_fuel fallback error: {e}")
+        warnings.append(f"nsw_fuel prices/new error: {e}")
 
     return stations, raw_by_id
 
@@ -872,7 +912,6 @@ async def _fetch_vic_fuel(
     if not settings.vic_fuel_enabled or not settings.vic_fuel_consumer_id:
         return []
 
-    import uuid
     hdrs = {
         "User-Agent": "Roam/1.0",
         "x-consumer-id": settings.vic_fuel_consumer_id,

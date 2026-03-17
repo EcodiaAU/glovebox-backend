@@ -1751,7 +1751,7 @@ _NT = _NtTrafficProvider()
 # Map state codes → provider instances
 _STATE_PROVIDERS: Dict[str, Any] = {
     "qld": _QLD,
-    "nsw": _NSW,
+    # "nsw": _NSW,  # DISABLED: api.transport.nsw.gov.au returns 404 on all feeds (Mar 2026)
     "vic": _VIC,
     "sa":  _SA,
     "wa":  _WA,

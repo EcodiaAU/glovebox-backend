@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import base64
 import logging
-import random
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -120,32 +120,14 @@ def _rest_key(polyline6: str, sample_interval_km: float, buffer_km: float, algo_
 
 
 # ──────────────────────────────────────────────────────────────
-# Overpass HTTP client (reuses same retry/throttle pattern as places.py)
+# Overpass HTTP client — delegates to global gate
 # ──────────────────────────────────────────────────────────────
-
-def _is_retryable(code: int) -> bool:
-    return code in (429, 502, 503, 504)
 
 
 async def _fetch_overpass(*, client: httpx.AsyncClient, ql: str) -> Dict[str, Any]:
-    attempts = int(getattr(settings, "overpass_retries", 2))
-    base_sleep = float(getattr(settings, "overpass_retry_base_s", 1.0))
-
-    last_exc: Optional[Exception] = None
-    for i in range(max(1, attempts)):
-        try:
-            r = await client.post(settings.overpass_url, content=ql.encode("utf-8"))
-            if _is_retryable(r.status_code):
-                await asyncio.sleep(base_sleep * (2 ** i) + random.random() * 0.25)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as exc:
-            last_exc = exc
-            if i < attempts - 1:
-                await asyncio.sleep(base_sleep * (2 ** i))
-
-    raise RuntimeError(f"Overpass failed after {attempts} attempts: {last_exc}")
+    """Delegate to global Overpass gate (ignores client for back-compat)."""
+    from app.core.overpass import overpass_fetch
+    return await overpass_fetch(ql, label="rest_areas")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -721,7 +703,7 @@ class RestAreas:
 
         # Cache hit
         cached = get_rest_area_pack(self.conn, key)
-        if cached and is_fresh(cached.get("created_at", ""), cache_seconds):
+        if cached and is_fresh(cached.get("created_at", ""), max_age_s=cache_seconds):
             logger.debug("rest_areas cache hit: %s", key)
             return RestAreaOverlay.model_validate(cached)
 

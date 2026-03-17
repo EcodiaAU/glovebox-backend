@@ -327,7 +327,7 @@ class CorridorPlacesRequest(BaseModel):
     limit: Optional[int] = None
     # Route polyline for true corridor search
     geometry: Optional[str] = None          # Polyline6 of the route
-    buffer_km: Optional[float] = 15.0       # Corridor buffer radius in km
+    buffer_km: Optional[float] = 35.0       # Corridor buffer radius in km
 
 
 class PlacesSuggestRequest(BaseModel):

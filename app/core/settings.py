@@ -35,10 +35,17 @@ class Settings(BaseSettings):
 
     # Places (Overpass)
     overpass_url: str = Field(default="https://overpass-api.de/api/interpreter", alias="OVERPASS_URL")
+    overpass_fallback_urls: list[str] = Field(
+        default=[
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        ],
+        alias="OVERPASS_FALLBACK_URLS",
+    )
     overpass_timeout_s: int = Field(default=60, alias="OVERPASS_TIMEOUT_S")
     overpass_throttle_s: float = Field(default=0.2, alias="OVERPASS_THROTTLE_S")
-    overpass_retries: int = Field(default=2, alias="OVERPASS_RETRIES")
-    overpass_retry_base_s: float = Field(default=1.0, alias="OVERPASS_RETRY_BASE_S")
+    overpass_retries: int = Field(default=4, alias="OVERPASS_RETRIES")
+    overpass_retry_base_s: float = Field(default=0.75, alias="OVERPASS_RETRY_BASE_S")
 
     # Places engine controls
     places_tile_step_deg: float = Field(default=0.15, alias="PLACES_TILE_STEP_DEG")
@@ -104,7 +111,10 @@ class Settings(BaseSettings):
     # Auth: Authorization: apikey {key}
     # ──────────────────────────────────────────────────────────────
 
-    nsw_traffic_enabled: bool = Field(default=True, alias="NSW_TRAFFIC_ENABLED")
+    # DISABLED: All api.transport.nsw.gov.au/v1/live/hazards/* endpoints
+    # return 404 as of March 2026. Disable to avoid wasted requests that
+    # contribute to Overpass 429 rate-limiting.
+    nsw_traffic_enabled: bool = Field(default=False, alias="NSW_TRAFFIC_ENABLED")
     nsw_traffic_api_key: str = Field(default="", alias="NSW_TRAFFIC_API_KEY")
     nsw_traffic_base_url: str = Field(
         default="https://api.transport.nsw.gov.au/v1/live/hazards",
@@ -442,11 +452,18 @@ class Settings(BaseSettings):
     fuel_algo_version: str = Field(default="fuel.v4.gov", alias="FUEL_ALGO_VERSION")
     fuel_cache_seconds: int = Field(default=1800, alias="FUEL_CACHE_SECONDS")  # 30min
 
-    # NSW FuelCheck - https://api.nsw.gov.au/Product/Index/22
+    # NSW FuelCheck - https://api.onegov.nsw.gov.au/ (Swagger: /api/swagger/spec/22)
+    # Migrated from api.nsw.gov.au (dead, 404) to api.onegov.nsw.gov.au in 2025/2026.
+    # Auth: OAuth2 client_credentials — POST /oauth/client_credential/accesstoken
+    #   with Basic(api_key:api_secret) → Bearer token.
+    # V2 endpoints cover NSW + TAS.
     nsw_fuel_enabled: bool = Field(default=True, alias="NSW_FUEL_ENABLED")
     nsw_fuel_api_key: str = Field(default="", alias="NSW_FUEL_API_KEY")
     nsw_fuel_api_secret: str = Field(default="", alias="NSW_FUEL_API_SECRET")
-    nsw_fuel_auth_header: str = Field(default="", alias="NSW_FUEL_AUTH_HEADER")
+    nsw_fuel_base_url: str = Field(
+        default="https://api.onegov.nsw.gov.au",
+        alias="NSW_FUEL_BASE_URL",
+    )
 
     # WA FuelWatch RSS - https://www.fuelwatch.wa.gov.au/fuelwatch/fuelWatchRSS
     # Free, no auth required. Covers all of WA including remote outback.
@@ -504,6 +521,7 @@ class Settings(BaseSettings):
     fatigue_rest_interval_km: float = Field(default=180.0, alias="FATIGUE_REST_INTERVAL_KM")
 
     # NSW TfNSW Rest Areas (requires Open Data API key)
+    # DISABLED: api.transport.nsw.gov.au returns 404 on spatial endpoint (Mar 2026)
     nsw_rest_areas_enabled: bool = Field(default=False, alias="NSW_REST_AREAS_ENABLED")
     nsw_rest_areas_api_key: str = Field(default="", alias="NSW_REST_AREAS_API_KEY")
     nsw_rest_areas_url: str = Field(

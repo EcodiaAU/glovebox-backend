@@ -33,9 +33,15 @@ def encode_polyline6(coords: List[Tuple[float, float]]) -> str:
 
 
 def _decode_value(s: str, idx: int) -> tuple[int, int]:
+    n = len(s)
     result = 0
     shift = 0
     while True:
+        if idx >= n:
+            raise ValueError(
+                f"Truncated polyline6 string at index {idx} "
+                f"(length {n}): unexpected end of input"
+            )
         b = ord(s[idx]) - 63
         idx += 1
         result |= (b & 0x1F) << shift

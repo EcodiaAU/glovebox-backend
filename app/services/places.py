@@ -1551,9 +1551,10 @@ def _build_overpass_ql(*, bbox: BBox4, filters: List[str], name_clause: str) -> 
             parts.append(f'way{name_clause}{f}{bbox_str};')
             parts.append(f'relation{name_clause}{f}{bbox_str};')
 
-    timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
+    http_timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
+    ql_timeout_s = max(10, http_timeout_s - 10)
     return (
-        f'[out:json][timeout:{timeout_s}];'
+        f'[out:json][timeout:{ql_timeout_s}];'
         f'('
         f'{"".join(parts)}'
         f');'
@@ -1569,8 +1570,18 @@ def _build_overpass_around_ql(
     name_clause: str,
     max_coords: int = 120,
 ) -> str:
-    if len(coords) > max_coords:
-        step = max(1, len(coords) // max_coords)
+    # Dynamically cap coords based on filter count to keep query size
+    # reasonable.  Each filter generates 2 clauses (node+way), each
+    # containing the full coord CSV.  Target max ~32KB of QL to stay
+    # well within Overpass server limits on public instances.
+    n_clauses = max(len(filters), 1) * 2
+    # ~25 bytes per coord pair ("-XX.XXXXX,XXX.XXXXX,")
+    max_ql_bytes = 32_000
+    coord_budget = max(10, max_ql_bytes // (n_clauses * 25))
+    effective_max = min(max_coords, coord_budget)
+
+    if len(coords) > effective_max:
+        step = max(1, len(coords) // effective_max)
         coords = coords[::step]
         if coords[-1] != coords[-1]:
             coords.append(coords[-1])
@@ -1587,9 +1598,13 @@ def _build_overpass_around_ql(
             parts.append(f"node{name_clause}{f}{around};")
             parts.append(f"way{name_clause}{f}{around};")
 
-    timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
+    http_timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
+    # Set the Overpass server-side timeout 10s shorter than the HTTP
+    # timeout so the server returns a proper error response instead of
+    # us getting a raw ReadTimeout.
+    ql_timeout_s = max(10, http_timeout_s - 10)
     return (
-        f"[out:json][timeout:{timeout_s}];"
+        f"[out:json][timeout:{ql_timeout_s}];"
         f"("
         f"{''.join(parts)}"
         f");"
@@ -1597,30 +1612,10 @@ def _build_overpass_around_ql(
     )
 
 
-def _is_retryable_status(code: int) -> bool:
-    return code in (429, 502, 503, 504)
-
-
-def _fetch_overpass_with_retries(*, client: httpx.Client, ql: str) -> Dict[str, Any]:
-    attempts = int(getattr(settings, "overpass_retries", 4))
-    base_sleep = float(getattr(settings, "overpass_retry_base_s", 0.75))
-
-    last_exc: Optional[Exception] = None
-    for i in range(attempts):
-        try:
-            r = client.post(settings.overpass_url, content=ql.encode("utf-8"))
-            if _is_retryable_status(r.status_code):
-                time.sleep(base_sleep * (2 ** i) + random.random() * 0.25)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_exc = e
-            time.sleep(base_sleep * (2 ** i) + random.random() * 0.25)
-
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("overpass_fetch_failed")
+def _fetch_overpass_with_retries(*, client: Any, ql: str, label: str = "places") -> Dict[str, Any]:
+    """Delegate to global Overpass gate (client arg ignored for back-compat)."""
+    from app.core.overpass import overpass_fetch_sync
+    return overpass_fetch_sync(ql, label=label)
 
 
 def _safe_overpass_name_regex(q: str) -> str:
@@ -1725,6 +1720,24 @@ def _bundle_places_budget(route_km: float) -> int:
     return int(max(350, min(5000, raw)))
 
 
+def _corridor_places_budget(route_km: float) -> int:
+    """
+    Dynamic corridor limit — scales with route length.
+
+    Slightly more generous than the bundle budget since this feeds
+    the live map with a wider 35km buffer, but still prevents absurd
+    counts for short trips.
+
+      50 km  →  ~600   (city hop)
+     100 km  → ~1000   (Sunny Coast → Brisbane)
+     200 km  → ~2000
+     500 km  → ~5000
+    1000 km  → ~8000   (cap)
+    """
+    raw = max(50.0, route_km) * 10.0
+    return int(max(600, min(8000, raw)))
+
+
 # ──────────────────────────────────────────────────────────────
 # Relevance scoring — ranks places within each tier so the
 # most useful/notable items are accepted first.
@@ -1746,12 +1759,16 @@ _CATEGORY_IMPORTANCE: Dict[str, float] = {
     "town": 3.0, "visitor_info": 2.5,
     # Essential infrastructure — always valuable but not "destination"
     "fuel": 2.0, "ev_charging": 2.0, "hospital": 2.0, "mechanic": 1.5, "emergency_phone": 2.5,
-    "grocery": 1.5, "pharmacy": 1.5, "camp": 2.5, "hotel": 2.0,
-    "motel": 2.0, "hostel": 2.0,
+    "grocery": 1.5, "pharmacy": 1.5,
+    # Accommodation — critical for trip planning, boosted
+    "camp": 4.0, "hotel": 2.5, "motel": 2.5, "hostel": 2.5,
+    # Amenities
+    "rest_area": 2.0, "dump_point": 1.5, "shower": 1.5,
+    "water": 1.0, "water_fill": 1.0, "toilet": 0.5,
     # Nice-to-have
     "restaurant": 1.5, "cafe": 1.5, "pub": 1.5, "bakery": 1.5,
-    "fast_food": 1.0, "bar": 1.0, "rest_area": 1.0, "toilet": 0.5,
-    "water": 1.0, "water_fill": 1.0, "dump_point": 0.5, "atm": 0.5, "laundromat": 0.5,
+    "fast_food": 1.0, "bar": 1.0,
+    "atm": 0.3, "laundromat": 0.5,
     "picnic": 1.0, "park": 1.0, "market": 1.5, "pool": 1.5,
     "playground": 1.0, "dog_park": 1.5, "golf": 1.5, "cinema": 1.5,
     "library": 1.0,
@@ -2092,6 +2109,169 @@ def _cluster_cap_tier2(
 
 
 # ──────────────────────────────────────────────────────────────
+# Corridor diversity — per-category caps + relevance scoring
+# ──────────────────────────────────────────────────────────────
+# Max fraction of total budget a single category can consume.
+# High-value trip categories (camp, nature) get generous caps;
+# low-value high-volume categories (ATM, laundromat) get tight caps.
+
+_CORRIDOR_CAT_CAP_FRACTION: Dict[str, float] = {
+    # Safety-critical — generous
+    "fuel":             0.15,
+    "ev_charging":      0.10,
+    "hospital":         0.05,
+    "mechanic":         0.05,
+    "pharmacy":         0.04,
+    "emergency_phone":  0.03,
+    # Accommodation — generous, core trip planning
+    "camp":             0.15,
+    "hotel":            0.08,
+    "motel":            0.08,
+    "hostel":           0.06,
+    # Amenities — important but not unlimited
+    "rest_area":        0.08,
+    "toilet":           0.05,
+    "water":            0.05,
+    "water_fill":       0.04,
+    "dump_point":       0.04,
+    "shower":           0.04,
+    "grocery":          0.06,
+    "town":             0.08,
+    # Low-value / high-volume — tight caps
+    "atm":              0.02,
+    "laundromat":       0.02,
+    "bar":              0.03,
+    # Nature & outdoors — generous, these are why people roam
+    "national_park":    0.08,
+    "viewpoint":        0.08,
+    "waterfall":        0.06,
+    "swimming_hole":    0.06,
+    "beach":            0.06,
+    "hiking":           0.06,
+    "picnic":           0.05,
+    "hot_spring":       0.04,
+    "cave":             0.04,
+    "fishing":          0.04,
+    "surf":             0.04,
+    # Food & drink — moderate
+    "cafe":             0.05,
+    "restaurant":       0.05,
+    "bakery":           0.04,
+    "fast_food":        0.04,
+    "pub":              0.04,
+}
+_CORRIDOR_CAT_CAP_DEFAULT = 0.04  # 4% for anything not listed
+
+
+def _corridor_diversify(
+    candidates: List[PlaceItem],
+    limit: int,
+    samples: List[Tuple[float, float]],
+) -> List[PlaceItem]:
+    """
+    Score all candidates, then select up to `limit` with per-category caps
+    so no single category dominates the results.
+
+    Strategy:
+    1. Score every item (category importance + data richness + proximity)
+    2. Group by category
+    3. Sort each group by score descending
+    4. Round-robin pick from categories, highest-scored first, respecting
+       per-category caps
+    5. Fill remaining slots with overflow from any category
+    """
+    if not candidates:
+        return []
+
+    # Score and group by category
+    scored: List[Tuple[float, PlaceItem]] = []
+    for it in candidates:
+        s = _score_place(it)
+        # Proximity bonus — closer to route = more relevant
+        d = _min_distance_to_samples_m(it.lat, it.lng, samples)
+        # Items within 5km of route get a bonus, items far away get penalised
+        if d < 5000:
+            s += 2.0
+        elif d < 15000:
+            s += 1.0
+        elif d > 25000:
+            s -= 1.0
+        scored.append((s, it))
+
+    # Group by category, sorted by score descending
+    by_cat: Dict[str, List[Tuple[float, PlaceItem]]] = collections.defaultdict(list)
+    for s, it in scored:
+        by_cat[str(it.category)].append((s, it))
+
+    for cat in by_cat:
+        by_cat[cat].sort(key=lambda x: x[0], reverse=True)
+
+    # Compute per-category caps
+    cat_caps: Dict[str, int] = {}
+    for cat in by_cat:
+        frac = _CORRIDOR_CAT_CAP_FRACTION.get(cat, _CORRIDOR_CAT_CAP_DEFAULT)
+        cap = max(3, int(limit * frac))  # at least 3 per category
+        cat_caps[cat] = cap
+
+    # Round-robin pick: cycle through categories, take one from each
+    result: List[PlaceItem] = []
+    result_ids: set[str] = set()
+    cat_taken: Dict[str, int] = collections.defaultdict(int)
+
+    # Sort categories by importance so high-value categories fill first
+    cat_order = sorted(
+        by_cat.keys(),
+        key=lambda c: _CATEGORY_IMPORTANCE.get(c, 1.0),
+        reverse=True,
+    )
+
+    # Phase 1: Round-robin respecting caps
+    pointers: Dict[str, int] = {cat: 0 for cat in cat_order}
+    made_progress = True
+    while len(result) < limit and made_progress:
+        made_progress = False
+        for cat in cat_order:
+            if len(result) >= limit:
+                break
+            if cat_taken[cat] >= cat_caps[cat]:
+                continue
+            idx = pointers[cat]
+            items_list = by_cat[cat]
+            if idx >= len(items_list):
+                continue
+            _, it = items_list[idx]
+            pointers[cat] = idx + 1
+            if it.id not in result_ids:
+                result.append(it)
+                result_ids.add(it.id)
+                cat_taken[cat] += 1
+                made_progress = True
+
+    # Phase 2: Fill remaining slots from overflow (ignore caps)
+    if len(result) < limit:
+        overflow = []
+        for cat in cat_order:
+            idx = pointers[cat]
+            for _, it in by_cat[cat][idx:]:
+                if it.id not in result_ids:
+                    overflow.append((_score_place(it), it))
+        overflow.sort(key=lambda x: x[0], reverse=True)
+        for _, it in overflow:
+            if len(result) >= limit:
+                break
+            result.append(it)
+            result_ids.add(it.id)
+
+    logger.info(
+        "corridor_diversify: candidates=%d selected=%d cats=%d caps=%s",
+        len(candidates), len(result), len(by_cat),
+        {c: f"{cat_taken[c]}/{cat_caps[c]}" for c in sorted(cat_taken) if cat_taken[c] > 0},
+    )
+
+    return result
+
+
+# ──────────────────────────────────────────────────────────────
 # Service
 # ──────────────────────────────────────────────────────────────
 
@@ -2316,8 +2496,7 @@ class Places:
                 label, len(samples), radius_m, len(filters), len(ql),
             )
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    data = _fetch_overpass_with_retries(client=client, ql=ql)
+                data = _fetch_overpass_with_retries(client=None, ql=ql, label=f"bundle_{label}")  # type: ignore[arg-type]
                 items: List[PlaceItem] = []
                 for el in data.get("elements") or []:
                     it = _element_to_item(el)
@@ -2355,8 +2534,7 @@ class Places:
                 len(samples), ci_buffer_m, len(ci_filters), len(ql),
             )
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    data = _fetch_overpass_with_retries(client=client, ql=ql)
+                data = _fetch_overpass_with_retries(client=None, ql=ql, label="bundle_critical")  # type: ignore[arg-type]
                 items: List[PlaceItem] = []
                 for el in data.get("elements") or []:
                     it = _element_to_item(el)
@@ -2446,15 +2624,24 @@ class Places:
             except Exception as e:
                 logger.warning("search_bundle tier1 supa FAILED: %r", e)
 
-        # Sort by relevance score descending, then accept top budget items
-        t1_candidates.sort(
+        # Critical infra (fuel/EV) are RESERVED — never budget-squeezed.
+        # They get their own dedicated Overpass query precisely because they
+        # are safety-critical; dropping them causes "No fuel ahead" while
+        # fuel icons are visible on the map via the fuel overlay layer.
+        ci_reserved = [it for it in t1_candidates if it.category in ci_cats_set]
+        ci_reserved_ids = {it.id for it in ci_reserved}
+        t1_non_ci = [it for it in t1_candidates if it.id not in ci_reserved_ids]
+
+        # Sort non-CI by relevance score, then fill remaining budget
+        t1_non_ci.sort(
             key=lambda it: _score_place(it, landmark_names), reverse=True,
         )
-        t1_items = t1_candidates[:t1_budget]
+        remaining_budget = max(0, t1_budget - len(ci_reserved))
+        t1_items = ci_reserved + t1_non_ci[:remaining_budget]
         seen_ids.update(it.id for it in t1_items)
 
-        logger.info("search_bundle tier1 DONE: candidates=%d accepted=%d / budget=%d",
-                     len(t1_candidates), len(t1_items), t1_budget)
+        logger.info("search_bundle tier1 DONE: candidates=%d ci_reserved=%d accepted=%d / budget=%d",
+                     len(t1_candidates), len(ci_reserved), len(t1_items), t1_budget)
 
         # ═══════════════════════════════════════════════════════
         # TIER 2 — collect all candidates, then diversity+score
@@ -2543,20 +2730,14 @@ class Places:
         return self._finalize_and_cache_pack(pack, publish_to_supa=True)
 
     # ──────────────────────────────────────────────────────────
-    # Corridor-aware route search - OVERPASS FIRST
-    # ──────────────────────────────────────────────────────────
-    #
-    # The critical change from v2: Overpass runs FIRST, then
-    # local/supa supplement.  Previously local ran first and if it
-    # had enough destination-area items (>70% of limit), Overpass
-    # was skipped - meaning start and mid-route got nothing.
+    # Corridor-aware route search
     # ──────────────────────────────────────────────────────────
 
     def search_corridor_polyline(
         self,
         *,
         polyline6: str,
-        buffer_km: float = 15.0,
+        buffer_km: float = 35.0,
         categories: List[PlaceCategory],
         limit: int = 8000,
         sample_interval_km: float = 8.0,
@@ -2616,34 +2797,67 @@ class Places:
         buffer_m = buffer_km * 1000.0
         corridor_bbox = _bbox_around_points(samples, buffer_km)
 
-        items: List[PlaceItem] = []
+        # Collect ALL candidates first, then score + cap for diversity
+        all_candidates: List[PlaceItem] = []
         seen_ids: set[str] = set()
 
-        def _accept(it: PlaceItem) -> bool:
-            if it.id in seen_ids:
-                return False
-            d = _min_distance_to_samples_m(it.lat, it.lng, samples)
-            return d <= buffer_m
+        def _dedup_add(source: List[PlaceItem]) -> int:
+            """Add items to candidates, dedup by id, filter by corridor buffer."""
+            added = 0
+            for it in source:
+                if it.id in seen_ids:
+                    continue
+                d = _min_distance_to_samples_m(it.lat, it.lng, samples)
+                if d <= buffer_m:
+                    seen_ids.add(it.id)
+                    all_candidates.append(it)
+                    added += 1
+            return added
 
         # ──────────────────────────────────────────────────────
-        # STEP 2: OVERPASS AROUND QUERY - RUNS FIRST
+        # STEP 2: LOCAL STORE FIRST
         # ──────────────────────────────────────────────────────
-        # This is the whole point of corridor search: query a true
-        # buffer along the actual road, from start to end.  Running
-        # this first ensures every stretch of the route gets coverage
-        # regardless of what's in the local store.
+        # Query local store first. If it has good coverage, we
+        # can skip or reduce the Overpass query — this avoids
+        # rate-limiting and makes repeat/nearby routes instant.
         # ──────────────────────────────────────────────────────
 
         provider_used = "corridor"
         overpass_items_total = 0
         used_overpass = False
 
+        try:
+            local_items = self.store.query_bbox(
+                bbox=corridor_bbox, categories=categories, limit=limit * 3,
+            )
+        except Exception as e:
+            logger.warning("corridor places_store query_bbox FAILED: %r", e)
+            local_items = []
+
+        local_count = _dedup_add(local_items)
+
+        # Count critical infra from local store to decide if Overpass is needed
+        ci_cats_set = set(str(c) for c in _CRITICAL_INFRA_CATS)
+        local_ci_count = sum(1 for it in all_candidates if str(it.category) in ci_cats_set)
+        local_satisfy_ratio = float(getattr(settings, "places_local_satisfy_ratio", 0.70))
+        local_coverage_good = len(all_candidates) >= int(limit * local_satisfy_ratio)
+
+        logger.info(
+            "corridor local-first: local=%d ci=%d limit=%d satisfy_ratio=%.0f%% coverage_good=%s",
+            local_count, local_ci_count, limit, local_satisfy_ratio * 100, local_coverage_good,
+        )
+
+        # ──────────────────────────────────────────────────────
+        # STEP 3: OVERPASS (only if local coverage is thin)
+        # ──────────────────────────────────────────────────────
+        # Always query critical infra (fuel/EV) from Overpass to
+        # ensure safety coverage. Skip the main query if local
+        # store already has good coverage.
+        # ──────────────────────────────────────────────────────
+
         timeout_s = float(getattr(settings, "overpass_timeout_s", 90))
         timeout = httpx.Timeout(timeout_s, connect=15.0)
 
-        # Split critical infra (fuel/EV) into a dedicated query with a higher
-        # coord limit so they are never squeezed out by the main all-category
-        # query timing out on long routes.
         ci_cats_in_req = [c for c in _CRITICAL_INFRA_CATS if c in set(categories)]
         non_ci_cats = [c for c in categories if c not in set(_CRITICAL_INFRA_CATS)]
 
@@ -2663,8 +2877,7 @@ class Places:
                 label, len(samples), buffer_m, len(f), len(ql),
             )
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    data = _fetch_overpass_with_retries(client=client, ql=ql)
+                data = _fetch_overpass_with_retries(client=None, ql=ql, label=f"corridor_{label}")  # type: ignore[arg-type]
                 result: List[PlaceItem] = []
                 for el in data.get("elements") or []:
                     it = _element_to_item(el)
@@ -2676,23 +2889,42 @@ class Places:
                 logger.warning("corridor Overpass %s FAILED: %r", label, e)
                 return []
 
-        # Run critical infra + main categories in parallel
+        # Critical infra always runs (fuel/EV are safety-critical).
+        # Main categories only run if local store coverage is thin.
         ci_fetched_corr: List[PlaceItem] = []
         main_fetched: List[PlaceItem] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {}
-            if ci_cats_in_req:
-                futures["ci"] = pool.submit(
-                    _corridor_overpass_fetch, ci_cats_in_req, _CRITICAL_INFRA_MAX_COORDS, "critical"
-                )
-            if non_ci_cats:
-                futures["main"] = pool.submit(
-                    _corridor_overpass_fetch, non_ci_cats, 120, "main"
-                )
-            if "ci" in futures:
-                ci_fetched_corr = futures["ci"].result()
-            if "main" in futures:
-                main_fetched = futures["main"].result()
+
+        # Run critical infra first (fast, small query), then main if needed
+        if ci_cats_in_req and local_ci_count < 10:
+            ci_fetched_corr = _corridor_overpass_fetch(
+                ci_cats_in_req, _CRITICAL_INFRA_MAX_COORDS, "critical"
+            )
+
+        if non_ci_cats and not local_coverage_good:
+            # Split main categories into smaller batches to keep each
+            # Overpass query lightweight.  For long corridors (many
+            # samples) we need more batches so each stays under the QL
+            # size / server-time budget.
+            n_batches = max(2, min(4, 1 + len(samples) // 60))
+            chunk_size = max(1, len(non_ci_cats) // n_batches + 1)
+            cat_batches = [
+                non_ci_cats[i : i + chunk_size]
+                for i in range(0, len(non_ci_cats), chunk_size)
+            ]
+            # Reduce max_coords for main batches — 50 is plenty for
+            # the around filter and keeps the query fast.
+            main_max_coords = 50
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(cat_batches), 3)) as pool:
+                futures = {}
+                for idx, batch in enumerate(cat_batches):
+                    if batch:
+                        lbl = f"main-{chr(ord('a') + idx)}"
+                        futures[lbl] = pool.submit(
+                            _corridor_overpass_fetch, batch, main_max_coords, lbl,
+                        )
+                for lbl, fut in futures.items():
+                    main_fetched.extend(fut.result())
 
         fetched = ci_fetched_corr + main_fetched
         if fetched:
@@ -2708,70 +2940,46 @@ class Places:
             # Publish to supa (best-effort)
             self._supa_upsert_best_effort(fetched, source="overpass_corridor")
 
-            # Accept items within the corridor buffer
-            for it in fetched:
-                if _accept(it):
-                    seen_ids.add(it.id)
-                    items.append(it)
-                    if len(items) >= limit:
-                        break
+            _dedup_add(fetched)
 
             logger.info(
-                "corridor after Overpass: accepted=%d critical=%d main=%d",
-                len(items), len(ci_fetched_corr), len(main_fetched),
+                "corridor after Overpass: candidates=%d critical=%d main=%d",
+                len(all_candidates), len(ci_fetched_corr), len(main_fetched),
             )
-
-        # ──────────────────────────────────────────────────────
-        # STEP 3: LOCAL STORE SUPPLEMENT
-        # ──────────────────────────────────────────────────────
-        # Now fill gaps with whatever's already in the local store.
-        # Items already seen from Overpass are deduplicated.
-        # ──────────────────────────────────────────────────────
-
-        local_count = 0
-        if len(items) < limit:
-            try:
-                local_items = self.store.query_bbox(
-                    bbox=corridor_bbox, categories=categories, limit=limit * 2,
-                )
-            except Exception as e:
-                logger.warning("corridor places_store query_bbox FAILED: %r", e)
-                local_items = []
-
-            for it in local_items:
-                if _accept(it):
-                    seen_ids.add(it.id)
-                    items.append(it)
-                    local_count += 1
-                    if len(items) >= limit:
-                        break
-
-            logger.debug("corridor after local supplement: +%d → total=%d", local_count, len(items))
+        elif local_coverage_good:
+            logger.info(
+                "corridor: skipped Overpass (local coverage good: %d items, %d ci)",
+                local_count, local_ci_count,
+            )
 
         # ──────────────────────────────────────────────────────
         # STEP 4: SUPA SUPPLEMENT
         # ──────────────────────────────────────────────────────
 
         supa_hit = 0
-        if self.supa is not None and len(items) < limit:
+        if self.supa is not None and len(all_candidates) < limit:
             try:
                 supa_items = self.supa.query_bbox(
                     bbox=corridor_bbox, categories=categories, limit=limit * 2,
                 )
                 if supa_items:
-                    supa_hit = len(supa_items)
+                    supa_hit = _dedup_add(supa_items)
                     self._supa_ingest_best_effort(supa_items)
-                    for it in supa_items:
-                        if _accept(it):
-                            seen_ids.add(it.id)
-                            items.append(it)
-                            if len(items) >= limit:
-                                break
                     provider_used = "corridor+supa"
             except Exception as e:
                 logger.warning("supa corridor query_bbox FAILED: %r", e)
 
-        # ── 5) Finalize ──────────────────────────────────────
+        # ──────────────────────────────────────────────────────
+        # STEP 5: SCORE, CAP PER-CATEGORY, AND SELECT
+        # ──────────────────────────────────────────────────────
+        # Score every candidate for relevance, then enforce
+        # per-category caps so low-value high-volume categories
+        # (ATMs, banks, toilets) don't drown out campsites,
+        # viewpoints, and other trip-worthy places.
+        # ──────────────────────────────────────────────────────
+
+        items = _corridor_diversify(all_candidates, limit, samples)
+
         if used_overpass:
             provider_used = (
                 f"{provider_used}+overpass"
@@ -2780,12 +2988,13 @@ class Places:
             )
 
         logger.info(
-            "corridor_polyline FINAL: provider=%s samples=%d overpass_raw=%d local_supplement=%d supa_supplement=%d total=%d",
+            "corridor_polyline FINAL: provider=%s samples=%d overpass_raw=%d local_first=%d supa_supplement=%d candidates=%d selected=%d",
             provider_used,
             len(samples),
             overpass_items_total,
             local_count,
             supa_hit,
+            len(all_candidates),
             len(items),
         )
 
@@ -2944,67 +3153,66 @@ class Places:
         total_supa_published = 0
 
         try:
-            with httpx.Client(timeout=timeout) as client:
-                for (tile_key, tb) in tiles:
+            for (tile_key, tb) in tiles:
+                if len(items) >= limit:
+                    break
+
+                if (time.time() - started) >= time_budget_s and tiles_fetched > 0:
+                    break
+
+                if self.store.tile_is_fresh(tile_key=tile_key, ttl_s=ttl_s):
+                    continue
+
+                ql = _build_overpass_ql(bbox=tb, filters=filters, name_clause=name_clause)
+                data = _fetch_overpass_with_retries(client=None, ql=ql, label="tile")  # type: ignore[arg-type]
+
+                fetched_items: List[PlaceItem] = []
+                got = 0
+                for el in (data.get("elements") or []):
+                    it = _element_to_item(el)
+                    if not it:
+                        continue
+                    fetched_items.append(it)
+                    got += 1
+
+                if fetched_items:
+                    used_overpass = True
+                    total_overpass_items += len(fetched_items)
+
+                    try:
+                        self.store.upsert_items(fetched_items)
+                    except Exception as e:
+                        logger.warning("PlacesStore.upsert_items FAILED: %r", e)
+
+                    total_supa_published += self._supa_upsert_best_effort(
+                        fetched_items,
+                        source="overpass",
+                    )
+
+                try:
+                    self.store.mark_tile_fetched(
+                        tile_key=tile_key,
+                        bbox=tb,
+                        categories=cats,
+                        item_count=int(got),
+                    )
+                except Exception as e:
+                    logger.warning("PlacesStore.mark_tile_fetched FAILED: %r", e)
+
+                for it in fetched_items:
+                    if it.id in seen_ids:
+                        continue
+                    seen_ids.add(it.id)
+                    items.append(it)
                     if len(items) >= limit:
                         break
 
-                    if (time.time() - started) >= time_budget_s and tiles_fetched > 0:
-                        break
+                tiles_fetched += 1
 
-                    if self.store.tile_is_fresh(tile_key=tile_key, ttl_s=ttl_s):
-                        continue
-
-                    ql = _build_overpass_ql(bbox=tb, filters=filters, name_clause=name_clause)
-                    data = _fetch_overpass_with_retries(client=client, ql=ql)
-
-                    fetched_items: List[PlaceItem] = []
-                    got = 0
-                    for el in (data.get("elements") or []):
-                        it = _element_to_item(el)
-                        if not it:
-                            continue
-                        fetched_items.append(it)
-                        got += 1
-
-                    if fetched_items:
-                        used_overpass = True
-                        total_overpass_items += len(fetched_items)
-
-                        try:
-                            self.store.upsert_items(fetched_items)
-                        except Exception as e:
-                            logger.warning("PlacesStore.upsert_items FAILED: %r", e)
-
-                        total_supa_published += self._supa_upsert_best_effort(
-                            fetched_items,
-                            source="overpass",
-                        )
-
-                    try:
-                        self.store.mark_tile_fetched(
-                            tile_key=tile_key,
-                            bbox=tb,
-                            categories=cats,
-                            item_count=int(got),
-                        )
-                    except Exception as e:
-                        logger.warning("PlacesStore.mark_tile_fetched FAILED: %r", e)
-
-                    for it in fetched_items:
-                        if it.id in seen_ids:
-                            continue
-                        seen_ids.add(it.id)
-                        items.append(it)
-                        if len(items) >= limit:
-                            break
-
-                    tiles_fetched += 1
-
-                    if tiles_fetched >= max_overpass_tiles:
-                        break
-                    if throttle_s > 0:
-                        time.sleep(throttle_s)
+                if tiles_fetched >= max_overpass_tiles:
+                    break
+                if throttle_s > 0:
+                    time.sleep(throttle_s)
 
         except Exception as e:
             logger.warning("overpass loop FAILED: %r", e)
@@ -3132,11 +3340,9 @@ class Places:
         filters = _overpass_filters_for_categories(candidates)
         ql = _build_overpass_ql(bbox=bbox, filters=filters, name_clause="")
 
-        timeout_s = int(getattr(settings, "overpass_timeout_s", 90))
         items: List[PlaceItem] = []
         try:
-            with httpx.Client(timeout=float(timeout_s)) as client:
-                data = _fetch_overpass_with_retries(client=client, ql=ql)
+            data = _fetch_overpass_with_retries(client=None, ql=ql, label="suggest_stops")  # type: ignore[arg-type]
             for el in data.get("elements", []):
                 item = _element_to_item(el)
                 if item and str(item.category) in {str(c) for c in candidates}:

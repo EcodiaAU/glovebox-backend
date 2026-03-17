@@ -242,7 +242,9 @@ class Elevation:
         return all_elevations
 
     def _fetch_open_elevation(self, latlngs: List[Tuple[float, float]]) -> List[float]:
-        """Open-Elevation public API — no key required, batched POST."""
+        """Open-Elevation public API — no key required, batched POST with retry."""
+        import time as _time
+
         all_elevations: List[float] = []
 
         for batch_start in range(0, len(latlngs), _OPEN_ELEV_BATCH_SIZE):
@@ -252,20 +254,36 @@ class Elevation:
                 for lat, lng in batch
             ]
 
-            resp = self.client.post(_OPEN_ELEV_URL, json={"locations": locations})
-            resp.raise_for_status()
+            # Retry up to 3 times with exponential backoff — the public
+            # Open-Elevation API frequently returns 504s under load.
+            last_err: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    resp = self.client.post(_OPEN_ELEV_URL, json={"locations": locations})
+                    resp.raise_for_status()
 
-            data = resp.json()
-            results = data.get("results", [])
+                    data = resp.json()
+                    results = data.get("results", [])
 
-            if len(results) != len(batch):
-                raise ValueError(
-                    f"Open-Elevation returned {len(results)} results for {len(batch)} points"
-                )
+                    if len(results) != len(batch):
+                        raise ValueError(
+                            f"Open-Elevation returned {len(results)} results for {len(batch)} points"
+                        )
 
-            for r in results:
-                elev = r.get("elevation")
-                all_elevations.append(float(elev) if elev is not None else 0.0)
+                    for r in results:
+                        elev = r.get("elevation")
+                        all_elevations.append(float(elev) if elev is not None else 0.0)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    if attempt < 2:
+                        wait = 1.5 * (2 ** attempt)  # 1.5s, 3s
+                        logger.info("elevation: Open-Elevation attempt %d failed (%s), retrying in %.1fs", attempt + 1, e, wait)
+                        _time.sleep(wait)
+
+            if last_err is not None:
+                raise last_err
 
         return all_elevations
 

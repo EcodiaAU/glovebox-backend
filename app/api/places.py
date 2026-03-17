@@ -138,11 +138,20 @@ def places_corridor(
     places: Places = Depends(get_places_service),
 ) -> PlacesPack:
     cats = req.categories or _CORRIDOR_DEFAULT_CATS
-    limit = int(req.limit or 8000)
 
     # ── Direct attribute access (geometry is on the Pydantic model) ──
     geometry = req.geometry
-    buffer_km = req.buffer_km or 15.0
+    buffer_km = req.buffer_km or 35.0
+
+    # ── Dynamic limit based on route length ──────────────────
+    if req.limit:
+        limit = int(req.limit)
+    elif geometry and len(geometry) > 10:
+        from app.services.places import _corridor_places_budget, _route_km_from_polyline
+        route_km = _route_km_from_polyline(geometry)
+        limit = _corridor_places_budget(route_km)
+    else:
+        limit = 2000  # fallback for bbox-only requests
 
     logger.info(
         "places_corridor: corridor_key=%s geometry=%s buffer_km=%s limit=%d",
@@ -190,13 +199,16 @@ def places_suggest(
     places: Places = Depends(get_places_service),
 ) -> PlacesSuggestResponse:
     cats = req.categories or _SUGGEST_DEFAULT_CATS
-    clusters = places.suggest_along_route(
-        polyline6=req.geometry,
-        interval_km=int(req.interval_km or 50),
-        radius_m=int(req.radius_m or 15000),
-        categories=cats,
-        limit_per_sample=int(req.limit_per_sample or 150),
-    )
+    try:
+        clusters = places.suggest_along_route(
+            polyline6=req.geometry,
+            interval_km=int(req.interval_km or 50),
+            radius_m=int(req.radius_m or 15000),
+            categories=cats,
+            limit_per_sample=int(req.limit_per_sample or 150),
+        )
+    except ValueError as exc:
+        bad_request("invalid_geometry", str(exc))
     return PlacesSuggestResponse(clusters=clusters)
 
 

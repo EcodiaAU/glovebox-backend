@@ -29,9 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import csv
 import hashlib
-import io
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -69,10 +67,6 @@ _ACT_LAT_MAX = -35.12
 _ACT_LNG_MIN = 148.76
 _ACT_LNG_MAX = 149.40
 
-_QLD_CAMERAS_URL = (
-    "https://open-crime-data.s3-ap-southeast-2.amazonaws.com"
-    "/Crime%20Statistics/RSCT_sites.csv"
-)
 _QLD_BLACK_SPOTS_URL = "https://data.qldtraffic.qld.gov.au/blackspotSites.geojson"
 _ACT_CAMERAS_URL = (
     "https://www.data.act.gov.au/api/views/426s-vdu4/rows.json?accessType=DOWNLOAD"
@@ -97,6 +91,26 @@ def _bbox_overlaps_brisbane(
         min_lat, min_lng, max_lat, max_lng,
         _BRISBANE_LAT_MIN, _BRISBANE_LAT_MAX, _BRISBANE_LNG_MIN, _BRISBANE_LNG_MAX,
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# Overpass helper — delegates to global gate
+# ══════════════════════════════════════════════════════════════
+
+
+async def _overpass_query(
+    client: httpx.AsyncClient,
+    ql: str,
+    warnings: List[str],
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    """Delegate to global Overpass gate."""
+    from app.core.overpass import overpass_fetch
+    try:
+        return await overpass_fetch(ql, label=f"speed_cameras_{label}")
+    except Exception as e:
+        warnings.append(f"speed_cameras:{label}_overpass: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -274,75 +288,86 @@ async def _fetch_qld_cameras(
     warnings: List[str],
 ) -> List[SpeedCamera]:
     """
-    Fetch QLD speed cameras from state-wide CSV.
-    The CSV has no spatial filter — we download once, cache it, then filter by bbox.
-    Fields: site_code, location, lat, lon (or Lat/Long), status (Active/Inactive).
+    Fetch QLD speed cameras from OpenStreetMap via Overpass API.
+
+    The QLD Government CSV (RSCT_sites.csv) contains no coordinates — only
+    site codes and location names — so we use OSM's `highway=speed_camera`
+    and `enforcement=maxspeed` nodes instead.  Overpass supports bbox
+    filtering natively, so we only fetch cameras in the route corridor.
+
+    Results are cached state-wide in cameras_static for 7 days.
     """
     _ensure_static_table(conn)
-    cached = _get_static(conn, "qld_cameras")
+
+    # Cache key includes bbox so different routes get fresh Overpass results
+    cache_key = f"qld_overpass_{min_lat:.2f}_{min_lng:.2f}_{max_lat:.2f}_{max_lng:.2f}"
+    cached = _get_static(conn, cache_key)
     if cached:
         fetched_at, cached_list = cached
         if is_fresh(fetched_at, max_age_s=_STATIC_CACHE_TTL_S):
-            logger.debug("speed_cameras: QLD cameras cache hit")
+            logger.debug("speed_cameras: QLD Overpass cache hit")
         else:
             cached = None
 
     if cached is None:
-        try:
-            resp = await client.get(_QLD_CAMERAS_URL, timeout=_HTTP_TIMEOUT)
-            resp.raise_for_status()
-            text = resp.text
-        except Exception as e:
-            warnings.append(f"speed_cameras:qld_fetch: {e}")
+        query = (
+            f"[out:json][timeout:15];"
+            f"("
+            f"  node[\"highway\"=\"speed_camera\"]({min_lat},{min_lng},{max_lat},{max_lng});"
+            f"  node[\"enforcement\"=\"maxspeed\"]({min_lat},{min_lng},{max_lat},{max_lng});"
+            f");"
+            f"out body;"
+        )
+        data = await _overpass_query(client, query, warnings, "qld")
+        if data is None:
             return []
 
+        elements = data.get("elements") or []
         all_cameras = []
-        try:
-            reader = csv.DictReader(io.StringIO(text))
-            for row in reader:
-                # Skip inactive cameras
-                status = str(row.get("status") or row.get("Status") or "").strip().lower()
-                if status and status not in ("active", "1", "true", "yes"):
-                    continue
+        seen: set = set()
+        for el in elements:
+            lat = _parse_float(el.get("lat"))
+            lng = _parse_float(el.get("lon"))
+            if lat is None or lng is None:
+                continue
+            # Deduplicate by rounded coords (speed_camera + enforcement can overlap)
+            coord_key = (round(lat, 5), round(lng, 5))
+            if coord_key in seen:
+                continue
+            seen.add(coord_key)
 
-                lat_raw = row.get("lat") or row.get("Lat") or row.get("latitude") or row.get("LATITUDE")
-                lng_raw = row.get("lon") or row.get("Lon") or row.get("long") or row.get("longitude") or row.get("LONGITUDE")
-                lat = _parse_float(lat_raw)
-                lng = _parse_float(lng_raw)
-                if lat is None or lng is None:
-                    continue
+            tags = el.get("tags") or {}
+            location = tags.get("name") or tags.get("description") or ""
+            maxspeed = tags.get("maxspeed") or ""
 
-                location = str(
-                    row.get("location") or row.get("Location") or row.get("site_name") or ""
-                ).strip()
-
-                all_cameras.append({
-                    "lat": lat,
-                    "lng": lng,
-                    "location": location,
-                    "status": status,
-                })
-        except Exception as e:
-            warnings.append(f"speed_cameras:qld_parse_csv: {e}")
-            return []
+            all_cameras.append({
+                "lat": lat,
+                "lng": lng,
+                "location": location,
+                "maxspeed": maxspeed,
+            })
 
         now = utc_now_iso()
-        _put_static(conn, "qld_cameras", now, all_cameras)
+        _put_static(conn, cache_key, now, all_cameras)
         cached = (now, all_cameras)
+        logger.info("speed_cameras: QLD Overpass returned %d elements → %d cameras", len(elements), len(all_cameras))
 
     _, all_cameras = cached
     cameras: List[SpeedCamera] = []
 
     for item in all_cameras:
         lat, lng = item["lat"], item["lng"]
-        if not (min_lat <= lat <= max_lat and min_lng <= lng <= max_lng):
-            continue
         dist_km = min_dist_to_route(lat, lng, route_samples)
+        location_desc = item.get("location") or "Queensland"
+        if item.get("maxspeed"):
+            location_desc = f"{location_desc} ({item['maxspeed']} km/h)".strip(" ()")
+            if not item.get("location"):
+                location_desc = f"{item['maxspeed']} km/h zone"
         cameras.append(SpeedCamera(
-            id=_make_camera_id("qld", lat, lng),
-            source="qld_cameras",
+            id=_make_camera_id("qld_osm", lat, lng),
+            source="qld_osm",
             camera_type="fixed_speed",
-            location_desc=item.get("location") or "Queensland",
+            location_desc=location_desc,
             lat=lat,
             lng=lng,
             is_school_zone=False,
@@ -695,6 +720,14 @@ class SpeedCameras:
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(coords, buffer_km)
         warnings: List[str] = []
 
+        # NSW bounding box (consistent with geo_registry)
+        _NSW_LAT_MIN, _NSW_LAT_MAX = -37.6, -27.5
+        _NSW_LNG_MIN, _NSW_LNG_MAX = 140.5, 154.0
+
+        include_nsw = bbox_overlaps(
+            min_lat, min_lng, max_lat, max_lng,
+            _NSW_LAT_MIN, _NSW_LAT_MAX, _NSW_LNG_MIN, _NSW_LNG_MAX,
+        )
         include_qld = bbox_overlaps(
             min_lat, min_lng, max_lat, max_lng,
             _QLD_LAT_MIN, _QLD_LAT_MAX, _QLD_LNG_MIN, _QLD_LNG_MAX,
@@ -705,79 +738,67 @@ class SpeedCameras:
         )
         include_brisbane = _bbox_overlaps_brisbane(min_lat, min_lng, max_lat, max_lng)
 
+        # Build tasks dynamically with labels for clean result extraction
+        task_labels: List[str] = []
         async with http_client(timeout=_HTTP_TIMEOUT) as client:
-            tasks = [
-                _fetch_nsw_cameras(
+            tasks = []
+
+            if include_nsw:
+                task_labels.append("nsw")
+                tasks.append(_fetch_nsw_cameras(
                     client, min_lat, min_lng, max_lat, max_lng,
                     route_samples, warnings,
-                ),
-            ]
+                ))
             if include_qld:
-                tasks.append(
-                    _fetch_qld_cameras(
-                        client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                        route_samples, warnings,
-                    )
-                )
+                task_labels.append("qld")
+                tasks.append(_fetch_qld_cameras(
+                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
+                    route_samples, warnings,
+                ))
             if include_act:
-                tasks.append(
-                    _fetch_act_cameras(
-                        client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                        route_samples, warnings,
-                    )
-                )
+                task_labels.append("act")
+                tasks.append(_fetch_act_cameras(
+                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
+                    route_samples, warnings,
+                ))
             if include_brisbane:
+                task_labels.append("brisbane")
                 tasks.append(_fetch_brisbane_occupancies(client, warnings))
-
             if include_qld:
-                tasks.append(
-                    _fetch_qld_black_spots(
-                        client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                        route_samples, warnings,
-                    )
-                )
+                task_labels.append("qld_black_spots")
+                tasks.append(_fetch_qld_black_spots(
+                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
+                    route_samples, warnings,
+                ))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Unpack results by label
+        result_map: Dict[str, Any] = dict(zip(task_labels, results))
         cameras: List[SpeedCamera] = []
         occupancies: List[RoadOccupancy] = []
         black_spots: List[RoadBlackSpot] = []
 
-        task_idx = 0
+        for label in ("nsw", "qld", "act"):
+            r = result_map.get(label)
+            if r is None:
+                continue
+            if isinstance(r, list):
+                cameras.extend(r)
+            elif isinstance(r, Exception):
+                warnings.append(f"speed_cameras:{label}_error: {r}")
 
-        # NSW cameras (always first)
-        if isinstance(results[task_idx], list):
-            cameras.extend(results[task_idx])
-        elif isinstance(results[task_idx], Exception):
-            warnings.append(f"speed_cameras:nsw_error: {results[task_idx]}")
-        task_idx += 1
+        r = result_map.get("brisbane")
+        if isinstance(r, list):
+            occupancies = r
+        elif isinstance(r, Exception):
+            warnings.append(f"speed_cameras:brisbane_error: {r}")
 
-        if include_qld:
-            if isinstance(results[task_idx], list):
-                cameras.extend(results[task_idx])
-            elif isinstance(results[task_idx], Exception):
-                warnings.append(f"speed_cameras:qld_error: {results[task_idx]}")
-            task_idx += 1
-
-        if include_act:
-            if isinstance(results[task_idx], list):
-                cameras.extend(results[task_idx])
-            elif isinstance(results[task_idx], Exception):
-                warnings.append(f"speed_cameras:act_error: {results[task_idx]}")
-            task_idx += 1
-
-        if include_brisbane:
-            if isinstance(results[task_idx], list):
-                occupancies = results[task_idx]
-            elif isinstance(results[task_idx], Exception):
-                warnings.append(f"speed_cameras:brisbane_error: {results[task_idx]}")
-            task_idx += 1
-
-        if include_qld:
-            if isinstance(results[task_idx], list):
-                black_spots = results[task_idx]
-            elif isinstance(results[task_idx], Exception):
-                warnings.append(f"speed_cameras:qld_black_spots_error: {results[task_idx]}")
+        r = result_map.get("qld_black_spots")
+        if isinstance(r, list):
+            black_spots = r
+        elif isinstance(r, Exception):
+            warnings.append(f"speed_cameras:qld_black_spots_error: {r}")
 
         cameras = [
             c for c in cameras
@@ -791,9 +812,10 @@ class SpeedCameras:
 
         logger.info(
             "speed_cameras: polyline=%d chars, bbox=%.3f,%.3f→%.3f,%.3f, "
-            "cameras=%d (qld=%s, act=%s), occupancies=%d, black_spots=%d",
+            "cameras=%d (nsw=%s, qld=%s, act=%s), occupancies=%d, black_spots=%d",
             len(polyline6), min_lat, min_lng, max_lat, max_lng,
-            len(cameras), include_qld, include_act, len(occupancies), len(black_spots),
+            len(cameras), include_nsw, include_qld, include_act,
+            len(occupancies), len(black_spots),
         )
 
         created_at = utc_now_iso()
