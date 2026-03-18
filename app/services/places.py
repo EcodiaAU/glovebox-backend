@@ -3378,8 +3378,8 @@ class Places:
                 if self.store.tile_is_fresh(tile_key=tile_key, ttl_s=ttl_s):
                     continue
 
-                ql = _build_overpass_ql_tiled(bbox=tb, filters=filters, name_clause=name_clause)
-                data = _fetch_overpass_with_retries(client=None, ql=ql, label="tile", timeout_s=12.0)
+                ql = _build_overpass_ql(bbox=tb, filters=filters, name_clause=name_clause)
+                data = _fetch_overpass_with_retries(client=None, ql=ql, label="tile")  # type: ignore[arg-type]
 
                 fetched_items: List[PlaceItem] = []
                 got = 0
