@@ -100,37 +100,20 @@ def _bbox_overlaps_brisbane(
 # ══════════════════════════════════════════════════════════════
 
 
-# Dedicated Overpass instances for lightweight overlay queries.
-# Separate from places.py's instances to avoid contention.
-_OVERLAY_OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
-
-
 async def _overpass_query(
     client: httpx.AsyncClient,
     ql: str,
     warnings: List[str],
     label: str,
 ) -> Optional[Dict[str, Any]]:
-    """Direct Overpass query with fast failover (3s connect timeout)."""
-    for url in _OVERLAY_OVERPASS_URLS:
-        try:
-            resp = await client.post(
-                url, data={"data": ql},
-                timeout=httpx.Timeout(12.0, connect=3.0),
-            )
-            if resp.status_code in (429, 502, 503, 504):
-                logger.warning("speed_cameras: Overpass %s returned %d, trying next", url, resp.status_code)
-                continue
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.warning("speed_cameras: Overpass %s failed: %r, trying next", url, e)
-    warnings.append(f"speed_cameras:{label}_overpass: all instances failed")
-    return None
+    """Overpass query routed through the global gate for coordinated concurrency."""
+    from app.core.overpass import overpass_fetch
+    try:
+        return await overpass_fetch(ql, label=f"speed_cameras_{label}")
+    except Exception as e:
+        logger.warning("speed_cameras: Overpass %s failed: %r", label, e)
+        warnings.append(f"speed_cameras:{label}_overpass: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════

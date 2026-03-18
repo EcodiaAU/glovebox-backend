@@ -39,11 +39,12 @@ logger = logging.getLogger(__name__)
 # ── Configuration ─────────────────────────────────────────────
 
 # Max concurrent Overpass requests across ALL services.
-# Overpass.de allows ~2 concurrent per IP; with 3 instances, 4 is safe.
-_MAX_CONCURRENT = 4
+# Overpass.de allows ~2 concurrent per IP; with 3 instances, 6 is safe
+# as requests get distributed across instances.
+_MAX_CONCURRENT = 6
 
 # Minimum seconds between requests to the SAME instance.
-_MIN_INSTANCE_SPACING_S = 1.5
+_MIN_INSTANCE_SPACING_S = 0.5
 
 # Retryable HTTP status codes.
 _RETRYABLE = frozenset({429, 502, 503, 504})
@@ -138,7 +139,7 @@ async def overpass_fetch(
             host = url.split("/")[2]
             try:
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout, connect=10.0),
+                    timeout=httpx.Timeout(timeout, connect=3.0),
                     follow_redirects=True,
                 ) as client:
                     resp = await client.post(url, data={"data": ql})
@@ -205,7 +206,7 @@ def overpass_fetch_sync(
             host = url.split("/")[2]
             try:
                 with httpx.Client(
-                    timeout=httpx.Timeout(timeout, connect=10.0),
+                    timeout=httpx.Timeout(timeout, connect=3.0),
                     follow_redirects=True,
                 ) as client:
                     resp = client.post(url, data={"data": ql})

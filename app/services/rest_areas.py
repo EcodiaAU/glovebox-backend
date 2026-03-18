@@ -127,32 +127,10 @@ def _rest_key(polyline6: str, sample_interval_km: float, buffer_km: float, algo_
 
 
 # Dedicated Overpass instances for lightweight overlay queries.
-# These are SEPARATE from the instances used by places.py (the global gate)
-# to avoid contention — places fires dozens of heavy tile queries that
-# saturate the main instances.
-_OVERLAY_OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
-
-
 async def _fetch_overpass(*, client: httpx.AsyncClient, ql: str) -> Dict[str, Any]:
-    """Direct Overpass query with fast failover (3s connect timeout)."""
-    for url in _OVERLAY_OVERPASS_URLS:
-        try:
-            resp = await client.post(
-                url, data={"data": ql},
-                timeout=httpx.Timeout(12.0, connect=3.0),
-            )
-            if resp.status_code in (429, 502, 503, 504):
-                logger.warning("rest_areas: Overpass %s returned %d, trying next", url, resp.status_code)
-                continue
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.warning("rest_areas: Overpass %s failed: %r, trying next", url, e)
-    raise RuntimeError("rest_areas: all Overpass instances failed")
+    """Overpass query routed through the global gate for coordinated concurrency."""
+    from app.core.overpass import overpass_fetch
+    return await overpass_fetch(ql, label="rest_areas")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -838,13 +816,12 @@ class RestAreas:
         raw_areas: List[RestArea] = []
 
         t0 = time.monotonic()
-        async with http_client(timeout=max(float(settings.overpass_timeout_s), 30.0)) as client:
-            try:
-                overpass_result = await _fetch_overpass(client=client, ql=ql)
-            except Exception as e:
-                logger.warning("rest_areas: Overpass query failed: %r", e)
-                warnings.append(f"Overpass query failed: {e}")
-                overpass_result = {}
+        try:
+            overpass_result = await _fetch_overpass(client=None, ql=ql)
+        except Exception as e:
+            logger.warning("rest_areas: Overpass query failed: %r", e)
+            warnings.append(f"Overpass query failed: {e}")
+            overpass_result = {}
         logger.info("rest_areas: Overpass completed in %.1fs", time.monotonic() - t0)
 
         # Build spatial grid index for fast nearest-sample lookups
