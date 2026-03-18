@@ -103,9 +103,9 @@ def _bbox_overlaps_brisbane(
 # Dedicated Overpass instances for lightweight overlay queries.
 # Separate from places.py's instances to avoid contention.
 _OVERLAY_OVERPASS_URLS = [
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
 ]
 
 
@@ -115,12 +115,12 @@ async def _overpass_query(
     warnings: List[str],
     label: str,
 ) -> Optional[Dict[str, Any]]:
-    """Direct Overpass query using dedicated instances (not shared with places.py)."""
+    """Direct Overpass query with fast failover (3s connect timeout)."""
     for url in _OVERLAY_OVERPASS_URLS:
         try:
             resp = await client.post(
                 url, data={"data": ql},
-                timeout=httpx.Timeout(15.0, connect=8.0),
+                timeout=httpx.Timeout(12.0, connect=3.0),
             )
             if resp.status_code in (429, 502, 503, 504):
                 logger.warning("speed_cameras: Overpass %s returned %d, trying next", url, resp.status_code)
