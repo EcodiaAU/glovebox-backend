@@ -720,98 +720,105 @@ class SpeedCameras:
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(coords, buffer_km)
         warnings: List[str] = []
 
-        # NSW bounding box (consistent with geo_registry)
-        _NSW_LAT_MIN, _NSW_LAT_MAX = -37.6, -27.5
-        _NSW_LNG_MIN, _NSW_LNG_MAX = 140.5, 154.0
-
-        include_nsw = bbox_overlaps(
-            min_lat, min_lng, max_lat, max_lng,
-            _NSW_LAT_MIN, _NSW_LAT_MAX, _NSW_LNG_MIN, _NSW_LNG_MAX,
+        # ── Single Overpass query for ALL speed cameras ──
+        # Replaces NSW ArcGIS (10-25s), QLD Overpass, ACT Socrata (10-25s).
+        # OSM has comprehensive speed camera data across all Australian states.
+        overpass_ql = (
+            f"[out:json][timeout:15];"
+            f"("
+            f"  node[\"highway\"=\"speed_camera\"]({min_lat},{min_lng},{max_lat},{max_lng});"
+            f"  node[\"enforcement\"=\"maxspeed\"]({min_lat},{min_lng},{max_lat},{max_lng});"
+            f"  node[\"enforcement\"=\"speed_camera\"]({min_lat},{min_lng},{max_lat},{max_lng});"
+            f");"
+            f"out body;"
         )
-        include_qld = bbox_overlaps(
-            min_lat, min_lng, max_lat, max_lng,
-            _QLD_LAT_MIN, _QLD_LAT_MAX, _QLD_LNG_MIN, _QLD_LNG_MAX,
-        )
-        include_act = bbox_overlaps(
-            min_lat, min_lng, max_lat, max_lng,
-            _ACT_LAT_MIN, _ACT_LAT_MAX, _ACT_LNG_MIN, _ACT_LNG_MAX,
-        )
-        include_brisbane = _bbox_overlaps_brisbane(min_lat, min_lng, max_lat, max_lng)
 
-        # Build tasks dynamically with labels for clean result extraction
-        task_labels: List[str] = []
-
-        async def _timed(label: str, coro):
-            t0 = time.monotonic()
-            result = await coro
-            elapsed = time.monotonic() - t0
-            logger.info("speed_cameras: %s completed in %.1fs", label, elapsed)
-            return result
-
-        async with http_client(timeout=_HTTP_TIMEOUT) as client:
-            tasks = []
-
-            if include_nsw:
-                task_labels.append("nsw")
-                tasks.append(_timed("nsw", _fetch_nsw_cameras(
-                    client, min_lat, min_lng, max_lat, max_lng,
-                    rgrid, warnings,
-                )))
-            if include_qld:
-                task_labels.append("qld")
-                tasks.append(_timed("qld", _fetch_qld_cameras(
-                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                    rgrid, warnings,
-                )))
-            if include_act:
-                task_labels.append("act")
-                tasks.append(_timed("act", _fetch_act_cameras(
-                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                    rgrid, warnings,
-                )))
-            if include_brisbane:
-                task_labels.append("brisbane")
-                tasks.append(_timed("brisbane", _fetch_brisbane_occupancies(client, warnings)))
-            if include_qld:
-                task_labels.append("qld_black_spots")
-                tasks.append(_timed("qld_black_spots", _fetch_qld_black_spots(
-                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
-                    rgrid, warnings,
-                )))
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Unpack results by label
-        result_map: Dict[str, Any] = dict(zip(task_labels, results))
         cameras: List[SpeedCamera] = []
         occupancies: List[RoadOccupancy] = []
         black_spots: List[RoadBlackSpot] = []
 
-        for label in ("nsw", "qld", "act"):
-            r = result_map.get(label)
-            if r is None:
-                continue
-            if isinstance(r, list):
-                cameras.extend(r)
-            elif isinstance(r, Exception):
-                warnings.append(f"speed_cameras:{label}_error: {r}")
+        include_qld = bbox_overlaps(
+            min_lat, min_lng, max_lat, max_lng,
+            _QLD_LAT_MIN, _QLD_LAT_MAX, _QLD_LNG_MIN, _QLD_LNG_MAX,
+        )
 
-        r = result_map.get("brisbane")
-        if isinstance(r, list):
-            occupancies = r
-        elif isinstance(r, Exception):
-            warnings.append(f"speed_cameras:brisbane_error: {r}")
+        t0 = time.monotonic()
+        async with http_client(timeout=_HTTP_TIMEOUT) as client:
+            tasks = []
+            task_labels = []
 
+            task_labels.append("overpass")
+            tasks.append(_overpass_query(client, overpass_ql, warnings, "all"))
+
+            # Black spots are SQLite-cached (7d TTL), fast
+            if include_qld:
+                task_labels.append("qld_black_spots")
+                tasks.append(_fetch_qld_black_spots(
+                    client, self.conn, min_lat, min_lng, max_lat, max_lng,
+                    rgrid, warnings,
+                ))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        result_map = dict(zip(task_labels, results))
+        elapsed = time.monotonic() - t0
+        logger.info("speed_cameras: Overpass + black_spots completed in %.1fs", elapsed)
+
+        # Parse Overpass cameras
+        overpass_data = result_map.get("overpass")
+        if isinstance(overpass_data, Exception):
+            warnings.append(f"speed_cameras:overpass_error: {overpass_data}")
+            overpass_data = None
+
+        if overpass_data:
+            seen: set = set()
+            for el in overpass_data.get("elements") or []:
+                lat = _parse_float(el.get("lat"))
+                lng = _parse_float(el.get("lon"))
+                if lat is None or lng is None:
+                    continue
+                coord_key = (round(lat, 5), round(lng, 5))
+                if coord_key in seen:
+                    continue
+                seen.add(coord_key)
+
+                tags = el.get("tags") or {}
+                dist_km = rgrid.dist(lat, lng)
+                if dist_km > buffer_km:
+                    continue
+
+                # Classify camera type from OSM tags
+                cam_type = "fixed_speed"
+                if tags.get("enforcement") == "red_light":
+                    cam_type = "red_light_speed"
+                elif "school" in (tags.get("name") or "").lower():
+                    cam_type = "school_zone"
+
+                location = tags.get("name") or tags.get("description") or ""
+                maxspeed = tags.get("maxspeed") or ""
+                if maxspeed and not location:
+                    location = f"{maxspeed} km/h zone"
+                elif maxspeed:
+                    location = f"{location} ({maxspeed} km/h)"
+
+                cameras.append(SpeedCamera(
+                    id=_make_camera_id("osm", lat, lng),
+                    source="osm_overpass",
+                    camera_type=cam_type,
+                    location_desc=location.strip() or "Speed camera",
+                    lat=lat,
+                    lng=lng,
+                    is_school_zone=(cam_type == "school_zone"),
+                    distance_from_route_km=round(dist_km, 2),
+                ))
+
+        # Black spots
         r = result_map.get("qld_black_spots")
         if isinstance(r, list):
             black_spots = r
         elif isinstance(r, Exception):
             warnings.append(f"speed_cameras:qld_black_spots_error: {r}")
 
-        cameras = [
-            c for c in cameras
-            if c.distance_from_route_km is not None and c.distance_from_route_km <= buffer_km
-        ]
         cameras.sort(key=lambda c: c.distance_from_route_km or 0.0)
 
         if len(cameras) > _MAX_CAMERAS:
@@ -820,10 +827,9 @@ class SpeedCameras:
 
         logger.info(
             "speed_cameras: polyline=%d chars, bbox=%.3f,%.3f→%.3f,%.3f, "
-            "cameras=%d (nsw=%s, qld=%s, act=%s), occupancies=%d, black_spots=%d",
+            "cameras=%d, black_spots=%d, elapsed=%.1fs",
             len(polyline6), min_lat, min_lng, max_lat, max_lng,
-            len(cameras), include_nsw, include_qld, include_act,
-            len(occupancies), len(black_spots),
+            len(cameras), len(black_spots), time.monotonic() - t0,
         )
 
         created_at = utc_now_iso()

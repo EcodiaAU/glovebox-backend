@@ -805,86 +805,24 @@ class RestAreas:
         # Build bbox around route
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(samples, buffer_km)
 
-        # Query Overpass
+        # Single Overpass query — replaces all government APIs.
+        # OSM in Australia is well-maintained for rest areas, camp sites,
+        # and service stations. Government APIs (QLD ArcGIS, WA MainRoads,
+        # NSW TfNSW) added marginal data but cost 40-90s per request.
         ql = _build_overpass_query(min_lat, min_lng, max_lat, max_lng)
 
         warnings: List[str] = []
         raw_areas: List[RestArea] = []
 
-        timeout = httpx.Timeout(float(settings.overpass_timeout_s), connect=15.0)
-
-        # Ensure government data is preloading in background
-        _ensure_preload()
-
-        bbox = (min_lng, min_lat, max_lng, max_lat)
-
-        overpass_result: Dict[str, Any] = {}
-
-        # Government data: use pre-cached state-wide data (instant).
-        # Only fetch from API if cache is cold (first request before preload finishes).
-        qld_areas: List[RestArea] = _gov_cache_get("qld") or []
-        wa_areas: List[RestArea] = _gov_cache_get("wa") or []
-
-        # Overpass + NSW are always per-route (bbox-filtered at source)
-        tasks_to_run = []
-        task_labels = []
-
-        async def _timed(label: str, coro):
-            t0 = time.monotonic()
-            result = await coro
-            elapsed = time.monotonic() - t0
-            logger.info("rest_areas: %s completed in %.1fs", label, elapsed)
-            return result
-
+        t0 = time.monotonic()
         async with http_client(timeout=max(float(settings.overpass_timeout_s), 30.0)) as client:
-            task_labels.append("overpass")
-            tasks_to_run.append(_timed("overpass", _fetch_overpass(client=client, ql=ql)))
-
-            # Only fetch gov data from API if preload hasn't cached yet
-            if not qld_areas:
-                task_labels.append("qld")
-                tasks_to_run.append(_timed("qld", _fetch_qld_rest_areas(client)))
-            else:
-                logger.info("rest_areas: QLD from preload cache (%d areas)", len(qld_areas))
-            if not wa_areas:
-                task_labels.append("wa")
-                tasks_to_run.append(_timed("wa", _fetch_wa_rest_areas(client)))
-            else:
-                logger.info("rest_areas: WA from preload cache (%d areas)", len(wa_areas))
-
-            task_labels.append("nsw")
-            tasks_to_run.append(_timed("nsw", _fetch_nsw_rest_areas(client, bbox)))
-
-            results = await asyncio.gather(*tasks_to_run, return_exceptions=True)
-
-        # Unpack results
-        result_map = dict(zip(task_labels, results))
-
-        r = result_map.get("overpass")
-        if isinstance(r, Exception):
-            logger.warning("rest_areas: Overpass query failed: %r", r)
-            warnings.append(f"Overpass query failed: {r}")
-        elif isinstance(r, dict):
-            overpass_result = r
-
-        r = result_map.get("qld")
-        if isinstance(r, list):
-            qld_areas = r
-        elif isinstance(r, Exception):
-            logger.warning("rest_areas: QLD fetch failed: %r", r)
-
-        r = result_map.get("wa")
-        if isinstance(r, list):
-            wa_areas = r
-        elif isinstance(r, Exception):
-            logger.warning("rest_areas: WA fetch failed: %r", r)
-
-        nsw_rest_areas: List[RestArea] = []
-        r = result_map.get("nsw")
-        if isinstance(r, list):
-            nsw_rest_areas = r
-        elif isinstance(r, Exception):
-            logger.warning("rest_areas: NSW fetch failed: %r", r)
+            try:
+                overpass_result = await _fetch_overpass(client=client, ql=ql)
+            except Exception as e:
+                logger.warning("rest_areas: Overpass query failed: %r", e)
+                warnings.append(f"Overpass query failed: {e}")
+                overpass_result = {}
+        logger.info("rest_areas: Overpass completed in %.1fs", time.monotonic() - t0)
 
         # Build spatial grid index for fast nearest-sample lookups
         grid = RouteGrid(samples)
@@ -893,17 +831,6 @@ class RestAreas:
         for el in overpass_result.get("elements") or []:
             area = _parse_element(el)
             if area is None:
-                continue
-            dist_km, km_along = grid.dist_and_km(area.lat, area.lng)
-            if dist_km > buffer_km:
-                continue
-            area.distance_from_route_km = round(dist_km, 2)
-            area.km_along = round(km_along, 2)
-            raw_areas.append(area)
-
-        # Bbox + corridor-filter government results (pre-cached state-wide data)
-        for area in (*qld_areas, *wa_areas, *nsw_rest_areas):
-            if not (min_lat <= area.lat <= max_lat and min_lng <= area.lng <= max_lng):
                 continue
             dist_km, km_along = grid.dist_and_km(area.lat, area.lng)
             if dist_km > buffer_km:
