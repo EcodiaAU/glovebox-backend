@@ -3056,11 +3056,42 @@ class Places:
         )
 
         # ──────────────────────────────────────────────────────
-        # STEP 3: OVERPASS (only if local coverage is thin)
+        # STEP 2.5: SUPABASE SUPPLEMENT (before Overpass)
         # ──────────────────────────────────────────────────────
-        # Always query critical infra (fuel/EV) from Overpass to
-        # ensure safety coverage. Skip the main query if local
-        # store already has good coverage.
+        # Query Supabase first — it has accumulated POI data from
+        # all previous corridor/bundle queries.  This is fast
+        # (~200ms) and may provide enough coverage to skip
+        # Overpass entirely.
+        # ──────────────────────────────────────────────────────
+        supa_hit = 0
+        if self.supa is not None and len(all_candidates) < limit:
+            try:
+                supa_items = self.supa.query_bbox(
+                    bbox=corridor_bbox, categories=categories, limit=limit * 2,
+                )
+                if supa_items:
+                    supa_hit = _dedup_add(supa_items)
+                    self._supa_ingest_best_effort(supa_items)
+                    logger.info("corridor supa-first: got %d items, total candidates=%d",
+                               supa_hit, len(all_candidates))
+            except Exception as e:
+                logger.warning("supa corridor query_bbox FAILED: %r", e)
+
+        # Re-evaluate coverage after Supabase supplement
+        local_ci_count = sum(1 for it in all_candidates if str(it.category) in ci_cats_set)
+        local_coverage_good = len(all_candidates) >= int(limit * local_satisfy_ratio)
+
+        logger.info(
+            "corridor after supa: candidates=%d ci=%d coverage_good=%s",
+            len(all_candidates), local_ci_count, local_coverage_good,
+        )
+
+        # ──────────────────────────────────────────────────────
+        # STEP 3: OVERPASS (only if local+supa coverage is thin)
+        # ──────────────────────────────────────────────────────
+        # Only hit Overpass if local store + Supabase don't have
+        # enough data.  This means repeat queries and popular
+        # corridors skip Overpass entirely.
         # ──────────────────────────────────────────────────────
 
         timeout_s = float(getattr(settings, "overpass_timeout_s", 90))
@@ -3167,22 +3198,7 @@ class Places:
                 local_count, local_ci_count,
             )
 
-        # ──────────────────────────────────────────────────────
-        # STEP 4: SUPA SUPPLEMENT
-        # ──────────────────────────────────────────────────────
-
-        supa_hit = 0
-        if self.supa is not None and len(all_candidates) < limit:
-            try:
-                supa_items = self.supa.query_bbox(
-                    bbox=corridor_bbox, categories=categories, limit=limit * 2,
-                )
-                if supa_items:
-                    supa_hit = _dedup_add(supa_items)
-                    self._supa_ingest_best_effort(supa_items)
-                    provider_used = "corridor+supa"
-            except Exception as e:
-                logger.warning("supa corridor query_bbox FAILED: %r", e)
+        # (Step 4 moved to Step 2.5 above — Supabase now runs BEFORE Overpass)
 
         # ──────────────────────────────────────────────────────
         # STEP 5: SCORE, CAP PER-CATEGORY, AND SELECT
@@ -3195,6 +3211,8 @@ class Places:
 
         items = _corridor_diversify(all_candidates, limit, samples)
 
+        if supa_hit > 0:
+            provider_used = f"{provider_used}+supa"
         if used_overpass:
             provider_used = (
                 f"{provider_used}+overpass"
