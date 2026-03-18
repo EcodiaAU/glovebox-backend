@@ -756,6 +756,113 @@ def _analyse_fatigue(
 
 
 # ──────────────────────────────────────────────────────────────
+# Places-store bridge — avoids duplicate Overpass calls
+# ──────────────────────────────────────────────────────────────
+
+_REST_CATEGORIES = ("rest_area", "camp", "toilet")
+
+def _read_places_store(
+    min_lat: float, min_lng: float, max_lat: float, max_lng: float,
+    conn,
+) -> List[Dict[str, Any]]:
+    """Read rest-area-relevant items from the places SQLite cache.
+
+    Returns raw dicts with lat, lng, name, category, tags.
+    Returns [] if the places table doesn't exist or is empty for this bbox.
+    """
+    try:
+        placeholders = ",".join("?" for _ in _REST_CATEGORIES)
+        sql = f"""
+        SELECT osm_type, osm_id, lat, lng, name, category, tags_json
+        FROM places_items
+        WHERE lat >= ? AND lat <= ? AND lng >= ? AND lng <= ?
+          AND category IN ({placeholders})
+        LIMIT 2000
+        """
+        params: list = [min_lat, max_lat, min_lng, max_lng, *_REST_CATEGORIES]
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        return [
+            {
+                "osm_type": r[0], "osm_id": r[1],
+                "lat": r[2], "lng": r[3],
+                "name": r[4], "category": r[5],
+                "tags": orjson.loads(r[6]) if r[6] else {},
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.debug("rest_areas: places_store read failed: %r", e)
+        return []
+
+
+def _place_item_to_rest_area(item: Dict[str, Any]) -> Optional[RestArea]:
+    """Convert a places_items row into a RestArea."""
+    lat = item.get("lat")
+    lng = item.get("lng")
+    if lat is None or lng is None:
+        return None
+
+    cat = item.get("category", "")
+    tags = item.get("tags") or {}
+
+    # Map places category → RestArea.type
+    # Places stores highway=services as "rest_area", camp_site/caravan_site as "camp"
+    type_map = {
+        "rest_area": "rest_area",
+        "camp": "camp_site",
+        "toilet": "toilets",
+    }
+    osm_type = type_map.get(cat)
+    if not osm_type:
+        return None
+
+    # Refine camp → camp_site vs caravan_site from original tags
+    if cat == "camp":
+        tourism = tags.get("tourism", "")
+        if tourism == "caravan_site":
+            osm_type = "caravan_site"
+
+    # Build stable ID
+    stable_id_raw = f"places::{osm_type}::{round(float(lat), 5)}::{round(float(lng), 5)}"
+    h = hashlib.sha256(stable_id_raw.encode()).digest()
+    stable_id = base64.urlsafe_b64encode(h).decode("ascii").rstrip("=")[:20]
+
+    # Extract facilities from tags
+    fac = RestFacilities(
+        toilets=_tag_bool(tags, "toilets"),
+        drinking_water=_tag_bool(tags, "drinking_water"),
+        shower=_tag_bool(tags, "shower"),
+        bbq=_tag_bool(tags, "bbq"),
+        picnic_table=_tag_bool(tags, "picnic_table"),
+        power_supply=_tag_bool(tags, "power_supply"),
+        internet=_tag_bool(tags, "internet_access"),
+        lit=_tag_bool(tags, "lit"),
+        shelter=_tag_bool(tags, "covered") or _tag_bool(tags, "shelter"),
+        capacity=int(tags["capacity"]) if tags.get("capacity", "").isdigit() else None,
+    )
+
+    score = sum([
+        bool(fac.toilets), bool(fac.drinking_water), bool(fac.shelter),
+        bool(fac.bbq or fac.picnic_table), bool(fac.lit),
+    ])
+
+    return RestArea(
+        id=stable_id,
+        name=item.get("name") or tags.get("name") or tags.get("ref") or None,
+        lat=float(lat),
+        lng=float(lng),
+        type=osm_type,
+        quality_score=score,
+        facilities=fac,
+        opening_hours=tags.get("opening_hours") or None,
+        fee=_tag_bool(tags, "fee"),
+        source="places_store",
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # Main service class
 # ──────────────────────────────────────────────────────────────
 
@@ -806,38 +913,55 @@ class RestAreas:
         # Build bbox around route
         min_lat, min_lng, max_lat, max_lng = bbox_from_coords(samples, buffer_km)
 
-        # Single Overpass query — replaces all government APIs.
-        # OSM in Australia is well-maintained for rest areas, camp sites,
-        # and service stations. Government APIs (QLD ArcGIS, WA MainRoads,
-        # NSW TfNSW) added marginal data but cost 40-90s per request.
-        ql = _build_overpass_query(min_lat, min_lng, max_lat, max_lng)
-
         warnings: List[str] = []
         raw_areas: List[RestArea] = []
-
-        t0 = time.monotonic()
-        try:
-            overpass_result = await _fetch_overpass(client=None, ql=ql)
-        except Exception as e:
-            logger.warning("rest_areas: Overpass query failed: %r", e)
-            warnings.append(f"Overpass query failed: {e}")
-            overpass_result = {}
-        logger.info("rest_areas: Overpass completed in %.1fs", time.monotonic() - t0)
 
         # Build spatial grid index for fast nearest-sample lookups
         grid = RouteGrid(samples)
 
-        # Parse and corridor-filter Overpass results
-        for el in overpass_result.get("elements") or []:
-            area = _parse_element(el)
-            if area is None:
-                continue
-            dist_km, km_along = grid.dist_and_km(area.lat, area.lng)
-            if dist_km > buffer_km:
-                continue
-            area.distance_from_route_km = round(dist_km, 2)
-            area.km_along = round(km_along, 2)
-            raw_areas.append(area)
+        # ── Strategy: read from places SQLite cache first (populated by
+        # the places step which runs before overlays).  This avoids a
+        # duplicate Overpass call that competes for the same instances and
+        # adds 10-90s of latency.  Fall back to Overpass only if the
+        # places store yields nothing.
+        t0 = time.monotonic()
+        places_items = _read_places_store(min_lat, min_lng, max_lat, max_lng, self.conn)
+        if places_items:
+            for item in places_items:
+                area = _place_item_to_rest_area(item)
+                if area is None:
+                    continue
+                dist_km, km_along = grid.dist_and_km(area.lat, area.lng)
+                if dist_km > buffer_km:
+                    continue
+                area.distance_from_route_km = round(dist_km, 2)
+                area.km_along = round(km_along, 2)
+                raw_areas.append(area)
+            logger.info(
+                "rest_areas: read %d items from places store → %d in corridor (%.1fs)",
+                len(places_items), len(raw_areas), time.monotonic() - t0,
+            )
+        else:
+            # Fallback: direct Overpass query
+            ql = _build_overpass_query(min_lat, min_lng, max_lat, max_lng)
+            try:
+                overpass_result = await _fetch_overpass(client=None, ql=ql)
+            except Exception as e:
+                logger.warning("rest_areas: Overpass query failed: %r", e)
+                warnings.append(f"Overpass query failed: {e}")
+                overpass_result = {}
+            logger.info("rest_areas: Overpass fallback completed in %.1fs", time.monotonic() - t0)
+
+            for el in overpass_result.get("elements") or []:
+                area = _parse_element(el)
+                if area is None:
+                    continue
+                dist_km, km_along = grid.dist_and_km(area.lat, area.lng)
+                if dist_km > buffer_km:
+                    continue
+                area.distance_from_route_km = round(dist_km, 2)
+                area.km_along = round(km_along, 2)
+                raw_areas.append(area)
 
         # Deduplicate
         areas = _dedup(raw_areas)
