@@ -2742,7 +2742,13 @@ class Places:
             except Exception as e:
                 logger.warning("search_bundle store upsert FAILED: %r", e)
             self._supa_upsert_best_effort(all_fetched, source="bundle_overpass")
-            asyncio.create_task(_wikidata_enrich_store(self.store))
+            # Fire-and-forget: runs in a daemon thread because this method
+            # is sync (no running event loop in the threadpool worker).
+            import threading
+            threading.Thread(
+                target=lambda: asyncio.run(_wikidata_enrich_store(self.store)),
+                daemon=True,
+            ).start()
 
         # ── Resolve regional landmarks for scoring ────────────
         landmark_names = _landmarks_for_route(samples)
@@ -3114,7 +3120,13 @@ class Places:
                 self.store.upsert_items(fetched)
             except Exception as e:
                 logger.warning("corridor places_store upsert FAILED: %r", e)
-            asyncio.create_task(_wikidata_enrich_store(self.store))
+            # Fire-and-forget: runs in a daemon thread because this method
+            # is sync (no running event loop in the threadpool worker).
+            import threading
+            threading.Thread(
+                target=lambda: asyncio.run(_wikidata_enrich_store(self.store)),
+                daemon=True,
+            ).start()
 
             # Publish to supa (best-effort)
             self._supa_upsert_best_effort(fetched, source="overpass_corridor")
@@ -3362,7 +3374,13 @@ class Places:
                         self.store.upsert_items(fetched_items)
                     except Exception as e:
                         logger.warning("PlacesStore.upsert_items FAILED: %r", e)
-                    asyncio.create_task(_wikidata_enrich_store(self.store))
+                    # Fire-and-forget: runs in a daemon thread because this method
+            # is sync (no running event loop in the threadpool worker).
+            import threading
+            threading.Thread(
+                target=lambda: asyncio.run(_wikidata_enrich_store(self.store)),
+                daemon=True,
+            ).start()
 
                     total_supa_published += self._supa_upsert_best_effort(
                         fetched_items,

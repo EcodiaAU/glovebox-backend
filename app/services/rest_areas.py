@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import base64
 import logging
+import threading
+import time
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -144,21 +146,22 @@ def _build_overpass_query(
     min_lat: float, min_lng: float, max_lat: float, max_lng: float,
 ) -> str:
     bbox = f"{min_lat},{min_lng},{max_lat},{max_lng}"
+    # Lean query — only node+way for actual rest areas / services.
+    # Camp/caravan sites use node-only (way queries are expensive and
+    # `out center` gives us the centroid anyway).
+    # Removed regex toilet filters ("highway"~".*") — they cause full
+    # tag scans across every toilet node in the bbox and are very slow.
     filters = [
         f'node["highway"="rest_area"]({bbox});',
         f'way["highway"="rest_area"]({bbox});',
         f'node["highway"="services"]({bbox});',
         f'way["highway"="services"]({bbox});',
         f'node["tourism"="camp_site"]({bbox});',
-        f'way["tourism"="camp_site"]({bbox});',
         f'node["tourism"="caravan_site"]({bbox});',
-        f'way["tourism"="caravan_site"]({bbox});',
-        f'node["amenity"="toilets"]["highway"~".*"]({bbox});',
-        f'node["amenity"="toilets"]["near_highway"~".*"]({bbox});',
     ]
     union = "\n  ".join(filters)
     ql_timeout = max(10, int(settings.overpass_timeout_s) - 10)
-    return f"""[out:json][timeout:{ql_timeout}][maxsize:16000000];
+    return f"""[out:json][timeout:{ql_timeout}];
 (
   {union}
 );
@@ -268,6 +271,12 @@ def _parse_element(el: Dict[str, Any]) -> Optional[RestArea]:
 
 _GOV_TIMEOUT = httpx.Timeout(30.0, connect=15.0)
 
+# In-memory cache for statewide government datasets (they rarely change).
+# Each entry: (timestamp, List[RestArea]).  TTL = 1 hour.
+_GOV_CACHE_TTL = 3600.0
+_gov_cache: Dict[str, Tuple[float, List["RestArea"]]] = {}
+_gov_cache_lock = threading.Lock()
+
 _QLD_BASE = (
     "https://spatial-gis.information.qld.gov.au/arcgis/rest/services"
     "/Transportation/StateRoadInformation/MapServer/17/query"
@@ -345,8 +354,26 @@ def _geojson_centroid(geometry: Dict[str, Any]) -> Optional[Tuple[float, float]]
     return None
 
 
+def _gov_cache_get(key: str) -> Optional[List[RestArea]]:
+    with _gov_cache_lock:
+        entry = _gov_cache.get(key)
+        if entry and (time.monotonic() - entry[0]) < _GOV_CACHE_TTL:
+            return entry[1]
+    return None
+
+
+def _gov_cache_set(key: str, areas: List[RestArea]) -> None:
+    with _gov_cache_lock:
+        _gov_cache[key] = (time.monotonic(), areas)
+
+
 async def _fetch_qld_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
     """Fetch QLD government rest areas (paginated ArcGIS MapServer)."""
+    cached = _gov_cache_get("qld")
+    if cached is not None:
+        logger.info("rest_areas: QLD cache hit (%d areas)", len(cached))
+        return cached
+
     features: List[Dict[str, Any]] = []
 
     async def _get_page(offset: int) -> List[Dict[str, Any]]:
@@ -410,6 +437,7 @@ async def _fetch_qld_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
         ))
 
     logger.info("rest_areas: QLD fetched %d features → %d areas", len(features), len(areas))
+    _gov_cache_set("qld", areas)
     return areas
 
 
@@ -418,6 +446,11 @@ async def _fetch_wa_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
 
     The host may block non-AU IPs — any request failure is silently skipped.
     """
+    cached = _gov_cache_get("wa")
+    if cached is not None:
+        logger.info("rest_areas: WA cache hit (%d areas)", len(cached))
+        return cached
+
     # tier → (quality_score_base, truck_friendly)
     tier_map = {
         "major":          (3, False),
@@ -498,6 +531,7 @@ async def _fetch_wa_rest_areas(client: httpx.AsyncClient) -> List[RestArea]:
 
     total_feats = sum(len(f) for f in tier_features.values())
     logger.info("rest_areas: WA fetched %d features → %d areas", total_feats, len(areas))
+    _gov_cache_set("wa", areas)
     return areas
 
 
