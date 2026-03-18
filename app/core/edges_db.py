@@ -389,11 +389,10 @@ class EdgesDBPostgres(EdgesDB):
                 chunk = node_ids[i:i + batch_size]
                 placeholders = ",".join("%s" for _ in chunk)
                 sql = f"""
-                    SELECT {self._SELECT_COLS} FROM edges
+                    SELECT {self._SELECT_COLS}
+                    FROM edges
                     WHERE from_id IN ({placeholders})
-                    UNION
-                    SELECT {self._SELECT_COLS} FROM edges
-                    WHERE to_id IN ({placeholders})
+                       OR to_id IN ({placeholders})
                 """
                 params = list(chunk) + list(chunk)
                 cur.execute(sql, params)

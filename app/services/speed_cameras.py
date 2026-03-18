@@ -106,10 +106,14 @@ async def _overpass_query(
     warnings: List[str],
     label: str,
 ) -> Optional[Dict[str, Any]]:
-    """Overpass query routed through the global gate for coordinated concurrency."""
+    """Overpass query routed through the global gate with a tight timeout.
+
+    Speed cameras are nice-to-have, not safety-critical.  Cap at 10s
+    per instance so the total is ≤30s worst case (3 instances).
+    """
     from app.core.overpass import overpass_fetch
     try:
-        return await overpass_fetch(ql, label=f"speed_cameras_{label}")
+        return await overpass_fetch(ql, label=f"speed_cameras_{label}", timeout_s=10.0)
     except Exception as e:
         logger.warning("speed_cameras: Overpass %s failed: %r", label, e)
         warnings.append(f"speed_cameras:{label}_overpass: {e}")
@@ -725,7 +729,7 @@ class SpeedCameras:
         # Replaces NSW ArcGIS (10-25s), QLD Overpass, ACT Socrata (10-25s).
         # OSM has comprehensive speed camera data across all Australian states.
         overpass_ql = (
-            f"[out:json][timeout:15];"
+            f"[out:json][timeout:8];"
             f"("
             f"  node[\"highway\"=\"speed_camera\"]({min_lat},{min_lng},{max_lat},{max_lng});"
             f"  node[\"enforcement\"=\"maxspeed\"]({min_lat},{min_lng},{max_lat},{max_lng});"
