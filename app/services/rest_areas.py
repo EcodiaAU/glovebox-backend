@@ -127,9 +127,28 @@ def _rest_key(polyline6: str, sample_interval_km: float, buffer_km: float, algo_
 
 
 async def _fetch_overpass(*, client: httpx.AsyncClient, ql: str) -> Dict[str, Any]:
-    """Delegate to global Overpass gate (ignores client for back-compat)."""
-    from app.core.overpass import overpass_fetch
-    return await overpass_fetch(ql, label="rest_areas")
+    """Direct Overpass query — bypasses the global gate to avoid queuing
+    behind the heavy places.py tile fetches.  These are small bbox queries
+    that complete in 2-5s."""
+    from app.core.settings import settings
+    urls = [
+        settings.overpass_url,
+        *(getattr(settings, "overpass_fallback_urls", None) or []),
+    ]
+    for url in urls:
+        try:
+            resp = await client.post(
+                url, data={"data": ql},
+                timeout=httpx.Timeout(20.0, connect=10.0),
+            )
+            if resp.status_code in (429, 502, 503, 504):
+                logger.warning("rest_areas: Overpass %s returned %d, trying next", url, resp.status_code)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning("rest_areas: Overpass %s failed: %r, trying next", url, e)
+    raise RuntimeError("rest_areas: all Overpass instances failed")
 
 
 # ──────────────────────────────────────────────────────────────

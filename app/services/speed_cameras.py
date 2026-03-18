@@ -106,13 +106,28 @@ async def _overpass_query(
     warnings: List[str],
     label: str,
 ) -> Optional[Dict[str, Any]]:
-    """Delegate to global Overpass gate."""
-    from app.core.overpass import overpass_fetch
-    try:
-        return await overpass_fetch(ql, label=f"speed_cameras_{label}")
-    except Exception as e:
-        warnings.append(f"speed_cameras:{label}_overpass: {e}")
-        return None
+    """Direct Overpass query — bypasses the global gate to avoid queuing
+    behind the heavy places.py tile fetches."""
+    from app.core.settings import settings
+    urls = [
+        settings.overpass_url,
+        *(getattr(settings, "overpass_fallback_urls", None) or []),
+    ]
+    for url in urls:
+        try:
+            resp = await client.post(
+                url, data={"data": ql},
+                timeout=httpx.Timeout(20.0, connect=10.0),
+            )
+            if resp.status_code in (429, 502, 503, 504):
+                logger.warning("speed_cameras: Overpass %s returned %d, trying next", url, resp.status_code)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning("speed_cameras: Overpass %s failed: %r, trying next", url, e)
+    warnings.append(f"speed_cameras:{label}_overpass: all instances failed")
+    return None
 
 
 # ══════════════════════════════════════════════════════════════

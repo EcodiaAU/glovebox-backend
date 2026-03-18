@@ -226,14 +226,17 @@ class Corridor:
                     dist = _haversine_m(slat, slng, sp_lat, sp_lng)
                     if dist < 500:  # skip stops very close to spine
                         continue
-                    # Grid key: round to ~1km grid for aggressive dedup
-                    grid_key = (round(sp_lat, 2), round(sp_lng, 2))
+                    # Grid key: round the STOP coords to ~1km grid.
+                    # This deduplicates stops that are close to each other,
+                    # while preserving stops in different directions from
+                    # the same spine point (which need separate routes).
+                    grid_key = (round(slat, 2), round(slng, 2))
                     if grid_key not in stop_routes or dist > stop_routes[grid_key][2]:
-                        stop_routes[grid_key] = (slat, slng, dist)
+                        stop_routes[grid_key] = (sp_lat, sp_lng, slat, slng, dist)
 
             unique_routes = [
-                (grid_key, slat, slng)
-                for grid_key, (slat, slng, _) in stop_routes.items()
+                (grid_key, sp_lat, sp_lng, slat, slng)
+                for grid_key, (sp_lat, sp_lng, slat, slng, _) in stop_routes.items()
             ]
 
             logger.info("corridor tree: spine + %d stops → %d unique routes (deduplicated)",
@@ -261,7 +264,7 @@ class Corridor:
                 stops_needing_route: list[tuple] = []
                 snapped = 0
                 for route_entry in unique_routes:
-                    grid_key, slat, slng = route_entry
+                    _gk, _sp_lat, _sp_lng, slat, slng = route_entry
                     nearest_node = self._osrm_nearest_node(slat, slng, client)
                     if nearest_node and nearest_node in all_node_ids:
                         snapped += 1
@@ -275,8 +278,7 @@ class Corridor:
 
                 # Parallel OSRM calls for remaining stop routes
                 def _route_stop(args):
-                    grid_key, slat, slng = args
-                    sp_lat, sp_lng = grid_key
+                    _gk, sp_lat, sp_lng, slat, slng = args
                     return self._osrm_route_nodes(sp_lat, sp_lng, slat, slng, client, alternatives=0)
 
                 routed = 0
