@@ -169,6 +169,8 @@ def _register_dependencies(app: FastAPI) -> None:
             cache_conn=_cache_conn,
             edges_db=_edges_db,
             algo_version=settings.corridor_algo_version,
+            osrm_base_url=settings.osrm_base_url,
+            osrm_profile="driving",
         )
 
     def provide_bundle_service() -> Bundle:

@@ -66,13 +66,14 @@ def route_key_from_request(req: Dict[str, Any], algo_version: str) -> str:
     return sha256_b32(blob)
 
 
-def corridor_key(route_key: str, buffer_m: int, max_edges: int, profile: str, algo_version: str) -> str:
+def corridor_key(route_key: str, buffer_m: int, max_edges: int, profile: str, algo_version: str, stop_count: int = 0) -> str:
     payload = {
         "algo_version": algo_version,
         "route_key": route_key,
         "buffer_m": int(buffer_m),
         "max_edges": int(max_edges),
         "profile": str(profile),
+        "stop_count": int(stop_count),
     }
     blob = _orjson_dumps(payload)
     return sha256_b32(blob)

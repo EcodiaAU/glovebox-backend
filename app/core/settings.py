@@ -26,12 +26,12 @@ class Settings(BaseSettings):
 
     # Versioning
     algo_version: str = Field(default="navpack.v1.osrm.mld", alias="ALGO_VERSION")
-    corridor_algo_version: str = Field(default="corridor.v1.edgesqlite", alias="CORRIDOR_ALGO_VERSION")
+    corridor_algo_version: str = Field(default="corridor.v16.tree", alias="CORRIDOR_ALGO_VERSION")
     places_algo_version: str = Field(default="places.v2.overpass.enriched", alias="PLACES_ALGO_VERSION")
 
     # Corridor defaults
-    corridor_buffer_m_default: int = Field(default=15000, alias="CORRIDOR_BUFFER_M_DEFAULT")
-    corridor_max_edges_default: int = Field(default=350000, alias="CORRIDOR_MAX_EDGES_DEFAULT")
+    corridor_buffer_m_default: int = Field(default=5000, alias="CORRIDOR_BUFFER_M_DEFAULT")
+    corridor_max_edges_default: int = Field(default=2000000, alias="CORRIDOR_MAX_EDGES_DEFAULT")
 
     # Places (Overpass)
     overpass_url: str = Field(default="https://overpass-api.de/api/interpreter", alias="OVERPASS_URL")

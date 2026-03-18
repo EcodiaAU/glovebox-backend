@@ -62,8 +62,99 @@ class EdgesDB(ABC):
         min_lat: float,
         max_lat: float,
         max_edges: int = 500_000,
+        highway_classes: Optional[List[str]] = None,
     ) -> List[EdgeRow]:
         ...
+
+    def query_circles(
+        self,
+        centers: List[tuple[float, float]],
+        radius_m: float,
+        max_edges_per_circle: int = 50_000,
+        highway_classes: Optional[List[str]] = None,
+    ) -> List[EdgeRow]:
+        """
+        Query edges within a radius around each center point.
+        Returns the union of all results (deduplicated by edge id).
+        Default implementation: convert circles to bboxes and query each.
+        """
+        import math
+
+        seen_ids: set[int] = set()
+        results: List[EdgeRow] = []
+
+        dlat = radius_m / 111_320.0
+
+        for lat, lng in centers:
+            cos_lat = max(0.2, math.cos(math.radians(lat)))
+            dlng = radius_m / (111_320.0 * cos_lat)
+
+            rows = self.query_bbox(
+                min_lng=lng - dlng,
+                max_lng=lng + dlng,
+                min_lat=lat - dlat,
+                max_lat=lat + dlat,
+                max_edges=max_edges_per_circle,
+                highway_classes=highway_classes,
+            )
+            for r in rows:
+                if r.id not in seen_ids:
+                    seen_ids.add(r.id)
+                    results.append(r)
+
+        return results
+
+    def query_by_node_ids(self, node_ids: List[int]) -> List[EdgeRow]:
+        """
+        Return all edges where from_id OR to_id is in the given set.
+        """
+        raise NotImplementedError("Subclass must implement query_by_node_ids")
+
+    def query_buffered_hull(
+        self,
+        points: List[tuple[float, float]],
+        buffer_m: float,
+        max_edges: int = 2_000_000,
+    ) -> List[EdgeRow]:
+        """
+        Query edges within a buffered convex hull around a set of (lat, lng) points.
+        Default implementation falls back to bbox. Postgres overrides with PostGIS.
+        """
+        if not points:
+            return []
+        import math
+        lats = [p[0] for p in points]
+        lngs = [p[1] for p in points]
+        dlat = buffer_m / 111_320.0
+        mid_lat = (min(lats) + max(lats)) / 2.0
+        cosv = max(0.2, math.cos(math.radians(mid_lat)))
+        dlng = buffer_m / (111_320.0 * cosv)
+        return self.query_bbox(
+            min_lng=min(lngs) - dlng,
+            max_lng=max(lngs) + dlng,
+            min_lat=min(lats) - dlat,
+            max_lat=max(lats) + dlat,
+            max_edges=max_edges,
+        )
+
+    def query_buffered_route(
+        self,
+        spine_points: List[tuple[float, float]],
+        stop_points: List[tuple[float, float]],
+        spine_buffer_m: float = 5000,
+        stop_buffer_m: float = 10000,
+        max_edges: int = 2_000_000,
+    ) -> List[EdgeRow]:
+        """
+        Query edges within a buffered route corridor.
+        The corridor is the UNION of:
+          - The route spine linestring buffered by spine_buffer_m
+          - Each stop point buffered by stop_buffer_m
+        Default implementation falls back to bbox.
+        Postgres overrides with a proper PostGIS spatial query.
+        """
+        all_pts = list(spine_points) + list(stop_points)
+        return self.query_buffered_hull(all_pts, max(spine_buffer_m, stop_buffer_m), max_edges)
 
     @abstractmethod
     def count(self) -> int:
@@ -109,34 +200,64 @@ class EdgesDBSqlite(EdgesDB):
         min_lat: float,
         max_lat: float,
         max_edges: int = 500_000,
+        highway_classes: Optional[List[str]] = None,
     ) -> List[EdgeRow]:
+        hw_clause = ""
+        hw_params: tuple = ()
+        if highway_classes:
+            placeholders = ",".join("?" for _ in highway_classes)
+            hw_clause = f" AND e.highway IN ({placeholders})"
+            hw_params = tuple(highway_classes)
+
         if self._has_rtree:
-            sql = """
+            sql = f"""
                 SELECT e.rowid AS _rowid, e.*
                 FROM edges e
                 JOIN edges_rtree r ON e.rowid = r.id
                 WHERE r.min_lng <= ? AND r.max_lng >= ?
                   AND r.min_lat <= ? AND r.max_lat >= ?
+                  {hw_clause}
                 LIMIT ?
             """
-            params = (max_lng, min_lng, max_lat, min_lat, max_edges)
+            params = (max_lng, min_lng, max_lat, min_lat) + hw_params + (max_edges,)
         else:
-            sql = """
+            hw_clause_no_alias = hw_clause.replace("e.", "")
+            sql = f"""
                 SELECT rowid AS _rowid, *
                 FROM edges
-                WHERE (from_lng BETWEEN ? AND ? AND from_lat BETWEEN ? AND ?)
-                   OR (to_lng   BETWEEN ? AND ? AND to_lat   BETWEEN ? AND ?)
+                WHERE ((from_lng BETWEEN ? AND ? AND from_lat BETWEEN ? AND ?)
+                   OR (to_lng   BETWEEN ? AND ? AND to_lat   BETWEEN ? AND ?))
+                  {hw_clause_no_alias}
                 LIMIT ?
             """
             params = (
                 min_lng, max_lng, min_lat, max_lat,
                 min_lng, max_lng, min_lat, max_lat,
-                max_edges,
-            )
+            ) + hw_params + (max_edges,)
 
         cur = self._conn.execute(sql, params)
         rows = cur.fetchall()
         return [self._row_to_edge(r) for r in rows]
+
+    def query_by_node_ids(self, node_ids: List[int]) -> List[EdgeRow]:
+        if not node_ids:
+            return []
+        # SQLite has a variable limit (~999), so batch in chunks
+        results: List[EdgeRow] = []
+        batch_size = 400  # half of 999 since we use IN twice
+        for i in range(0, len(node_ids), batch_size):
+            chunk = node_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            sql = f"""
+                SELECT rowid AS _rowid, *
+                FROM edges
+                WHERE from_id IN ({placeholders})
+                   OR to_id IN ({placeholders})
+            """
+            params = tuple(chunk) + tuple(chunk)
+            cur = self._conn.execute(sql, params)
+            results.extend(self._row_to_edge(r) for r in cur.fetchall())
+        return results
 
     def count(self) -> int:
         cur = self._conn.execute("SELECT COUNT(*) FROM edges")
@@ -225,15 +346,146 @@ class EdgesDBPostgres(EdgesDB):
         min_lat: float,
         max_lat: float,
         max_edges: int = 500_000,
+        highway_classes: Optional[List[str]] = None,
     ) -> List[EdgeRow]:
+        hw_clause = ""
+        params: list = [min_lng, min_lat, max_lng, max_lat]
+        if highway_classes:
+            placeholders = ",".join("%s" for _ in highway_classes)
+            hw_clause = f" AND highway IN ({placeholders})"
+            params.extend(highway_classes)
+        params.append(max_edges)
+
         sql = f"""
             SELECT {self._SELECT_COLS}
             FROM edges
             WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+            {hw_clause}
             LIMIT %s
         """
-        # ST_MakeEnvelope(xmin, ymin, xmax, ymax) = (min_lng, min_lat, max_lng, max_lat)
-        params = (min_lng, min_lat, max_lng, max_lat, max_edges)
+
+        conn = self._pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            cur.close()
+            return [self._tuple_to_edge(r) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
+    def query_by_node_ids(self, node_ids: List[int]) -> List[EdgeRow]:
+        if not node_ids:
+            return []
+        # Postgres handles large IN lists well, but batch at 10k to be safe
+        results: List[EdgeRow] = []
+        batch_size = 10_000
+        conn = self._pool.getconn()
+        try:
+            cur = conn.cursor()
+            for i in range(0, len(node_ids), batch_size):
+                chunk = node_ids[i:i + batch_size]
+                placeholders = ",".join("%s" for _ in chunk)
+                sql = f"""
+                    SELECT {self._SELECT_COLS}
+                    FROM edges
+                    WHERE from_id IN ({placeholders})
+                       OR to_id IN ({placeholders})
+                """
+                params = list(chunk) + list(chunk)
+                cur.execute(sql, params)
+                results.extend(self._tuple_to_edge(r) for r in cur.fetchall())
+            cur.close()
+            return results
+        finally:
+            self._pool.putconn(conn)
+
+    def query_buffered_hull(
+        self,
+        points: List[tuple[float, float]],
+        buffer_m: float,
+        max_edges: int = 2_000_000,
+    ) -> List[EdgeRow]:
+        if not points:
+            return []
+
+        # Build a MULTIPOINT from all (lat,lng) → (lng,lat) for PostGIS
+        point_wkts = [f"{lng} {lat}" for lat, lng in points]
+        multipoint_wkt = f"MULTIPOINT({','.join(point_wkts)})"
+
+        # ST_Buffer on geography type gives meters.
+        # Build convex hull of all points, buffer it, then check edge intersection.
+        sql = f"""
+            SELECT {self._SELECT_COLS}
+            FROM edges
+            WHERE geom && ST_Buffer(
+                ST_ConvexHull(ST_GeomFromText(%s, 4326))::geography,
+                %s
+            )::geometry
+            LIMIT %s
+        """
+        params = [multipoint_wkt, buffer_m, max_edges]
+
+        conn = self._pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            cur.close()
+            return [self._tuple_to_edge(r) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
+    def query_buffered_route(
+        self,
+        spine_points: List[tuple[float, float]],
+        stop_points: List[tuple[float, float]],
+        spine_buffer_m: float = 5000,
+        stop_buffer_m: float = 10000,
+        max_edges: int = 2_000_000,
+    ) -> List[EdgeRow]:
+        """
+        PostGIS-optimized corridor query.
+        Builds a narrow corridor as the UNION of:
+          - The route spine LINESTRING buffered by spine_buffer_m (narrow tube)
+          - All stops as a MULTIPOINT buffered by stop_buffer_m (circles that merge)
+        Much tighter than a convex hull — follows the actual road shape.
+        """
+        if not spine_points:
+            return []
+
+        # Spine as LINESTRING
+        spine_wkt = "LINESTRING(" + ", ".join(f"{lng} {lat}" for lat, lng in spine_points) + ")"
+
+        if stop_points:
+            # Stops as MULTIPOINT
+            stops_wkt = "MULTIPOINT(" + ", ".join(f"{lng} {lat}" for lat, lng in stop_points) + ")"
+
+            # Union of buffered spine + buffered stops convex hull
+            # Use ST_ConvexHull on stops to merge overlapping circles efficiently
+            # then buffer the hull. For stops that are isolated, the hull still
+            # wraps tightly around them.
+            sql = f"""
+                SELECT {self._SELECT_COLS}
+                FROM edges
+                WHERE geom && ST_Union(
+                    ST_Buffer(ST_GeomFromText(%s, 4326)::geography, %s)::geometry,
+                    ST_Buffer(ST_GeomFromText(%s, 4326)::geography, %s)::geometry
+                )
+                LIMIT %s
+            """
+            params = [spine_wkt, spine_buffer_m, stops_wkt, stop_buffer_m, max_edges]
+        else:
+            sql = f"""
+                SELECT {self._SELECT_COLS}
+                FROM edges
+                WHERE geom && ST_Buffer(
+                    ST_GeomFromText(%s, 4326)::geography,
+                    %s
+                )::geometry
+                LIMIT %s
+            """
+            params = [spine_wkt, spine_buffer_m, max_edges]
 
         conn = self._pool.getconn()
         try:

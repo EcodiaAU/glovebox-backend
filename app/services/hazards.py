@@ -1750,9 +1750,9 @@ _RADAR_KIND_MAP: Dict[str, str] = {
 }
 
 _RADAR_SEVERITY_MAP: Dict[str, str] = {
-    "flood": "extreme",
-    "crash": "severe",
-    "fire": "severe",
+    "flood": "high",
+    "crash": "high",
+    "fire": "high",
 }
 
 
@@ -1761,7 +1761,7 @@ def _radar_kind(updated_category: str) -> str:
 
 
 def _radar_severity(category: str) -> str:
-    return _RADAR_SEVERITY_MAP.get(category.lower(), "moderate")
+    return _RADAR_SEVERITY_MAP.get(category.lower(), "medium")
 
 
 def _epoch_ms_to_iso(ms: Any) -> Optional[str]:

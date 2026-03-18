@@ -143,21 +143,23 @@ def places_corridor(
     geometry = req.geometry
     buffer_km = req.buffer_km or 35.0
 
-    # ── Dynamic limit based on route length ──────────────────
+    # ── Dynamic limit based on route extent ──────────────────
+    extent_km = 0.0
     if req.limit:
         limit = int(req.limit)
     elif geometry and len(geometry) > 10:
-        from app.services.places import _corridor_places_budget, _route_km_from_polyline
-        route_km = _route_km_from_polyline(geometry)
-        limit = _corridor_places_budget(route_km)
+        from app.services.places import _corridor_places_budget, _route_extent_km
+        extent_km = _route_extent_km(geometry)
+        limit = _corridor_places_budget(extent_km)
     else:
         limit = 2000  # fallback for bbox-only requests
 
     logger.info(
-        "places_corridor: corridor_key=%s geometry=%s buffer_km=%s limit=%d",
+        "places_corridor: corridor_key=%s geometry=%s buffer_km=%s extent_km=%.0f limit=%d",
         req.corridor_key[:16] if req.corridor_key else "?",
         f"polyline6[{len(geometry)}]" if geometry else "NONE",
         buffer_km,
+        extent_km,
         limit,
     )
 

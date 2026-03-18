@@ -135,6 +135,7 @@ class CorridorEnsureRequest(BaseModel):
     profile: str = "drive"
     buffer_m: int | None = None
     max_edges: int | None = None
+    stop_coords: list[list[float]] | None = None  # [[lat, lng], ...]
 
 
 @router.post("/corridor/ensure", response_model=CorridorGraphMeta)
@@ -150,12 +151,18 @@ def corridor_ensure(
     buffer_m = int(req.buffer_m or settings.corridor_buffer_m_default)
     max_edges = int(req.max_edges or settings.corridor_max_edges_default)
 
+    stop_tuples = None
+    if req.stop_coords:
+        stop_tuples = [(c[0], c[1]) for c in req.stop_coords if len(c) >= 2]
+
+    logger.info(">>> NAV corridor.ensure with %d stop_coords", len(stop_tuples) if stop_tuples else 0)
     result = corridor.ensure(
         route_key=req.route_key,
         route_polyline6=req.geometry,
         profile=req.profile or "drive",
         buffer_m=buffer_m,
         max_edges=max_edges,
+        stop_coords=stop_tuples,
     )
     return result.meta
 

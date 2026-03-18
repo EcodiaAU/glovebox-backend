@@ -1789,13 +1789,13 @@ def _bundle_places_budget(route_km: float) -> int:
     return int(max(350, min(5000, raw)))
 
 
-def _corridor_places_budget(route_km: float) -> int:
+def _corridor_places_budget(extent_km: float) -> int:
     """
-    Dynamic corridor limit — scales with route length.
+    Dynamic corridor limit — scales with route *extent* (bbox diagonal).
 
-    Slightly more generous than the bundle budget since this feeds
-    the live map with a wider 35km buffer, but still prevents absurd
-    counts for short trips.
+    Takes the geographic footprint of the route, NOT the traverse distance.
+    A winding 700 km loop that only spans 120 km N-S gets budgeted as ~120 km,
+    preventing dense urban areas from flooding the results.
 
       50 km  →  ~600   (city hop)
      100 km  → ~1000   (Sunny Coast → Brisbane)
@@ -1803,7 +1803,7 @@ def _corridor_places_budget(route_km: float) -> int:
      500 km  → ~5000
     1000 km  → ~8000   (cap)
     """
-    raw = max(50.0, route_km) * 10.0
+    raw = max(50.0, extent_km) * 10.0
     return int(max(600, min(8000, raw)))
 
 
@@ -2126,6 +2126,25 @@ def _route_km_from_polyline(poly6: str) -> float:
             (float(pts[i][0]), float(pts[i][1])),
         )
     return total / 1000.0
+
+
+def _route_extent_km(poly6: str) -> float:
+    """Geographic extent of a route — bbox diagonal in km.
+
+    Unlike _route_km_from_polyline (which sums every segment and grows with
+    back-tracking / winding), this measures the *footprint* of the route.
+    A 700 km winding loop that only spans ~120 km north-south returns ~120,
+    not 700.  Used for the corridor places budget so loopy routes don't
+    pull an absurd number of stops.
+    """
+    pts = decode_polyline6(poly6)
+    if not pts or len(pts) < 2:
+        return 0.0
+    lats = [float(p[0]) for p in pts]
+    lngs = [float(p[1]) for p in pts]
+    sw = (min(lats), min(lngs))
+    ne = (max(lats), max(lngs))
+    return _haversine_m(sw, ne) / 1000.0
 
 
 def _cluster_cap_tier2(

@@ -6,6 +6,8 @@ import httpx
 
 import math
 
+import logging
+
 from app.core.contracts import (
     AvoidZoneRequest,
     BBox4,
@@ -16,11 +18,14 @@ from app.core.contracts import (
     NavRoute,
     NavStep,
     RouteAlternates,
+    TripStop,
 )
 from app.core.errors import bad_request, service_unavailable
 from app.core.keying import route_key_from_request
 from app.core.polyline6 import decode_polyline6, encode_polyline6
 from app.core.time import utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -243,23 +248,26 @@ class Routing:
             algo_version=self.algo_version,
         )
 
-    def route(self, req: NavRequest) -> NavPack:
-        if len(req.stops) < 2:
-            bad_request("bad_nav_request", "stops must contain at least 2 points")
+    # ── OSRM call helper ────────────────────────────────────────
 
-        # OSRM expects lng,lat
-        coords = ";".join([f"{s.lng},{s.lat}" for s in req.stops])
+    def _call_osrm(
+        self, stops: List[TripStop], *, alternatives: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call OSRM and return the JSON body, or *None* if OSRM responds
+        with a ``NoRoute`` / ``NoSegment`` error (i.e. impossible route).
 
-        # Request alternatives when avoid zones are present so we can pick
-        # the route with least hazard exposure
-        has_avoid = bool(req.avoid_zones)
+        Raises ``service_unavailable`` only for real failures (network,
+        5xx, unexpected status).
+        """
+        coords = ";".join([f"{s.lng},{s.lat}" for s in stops])
         url = f"{self.osrm_base_url}/route/v1/{self.osrm_profile}/{coords}"
         params = {
             "overview": "full",
             "geometries": "polyline6",
             "steps": "true",
             "annotations": "distance,duration,speed",
-            "alternatives": "3" if has_avoid else "false",
+            "alternatives": str(alternatives) if alternatives else "false",
         }
 
         try:
@@ -267,13 +275,154 @@ class Routing:
         except Exception as e:
             service_unavailable("osrm_unreachable", f"OSRM request failed: {e}")
 
-        if r.status_code != 200:
-            service_unavailable(
-                "osrm_error",
-                f"OSRM returned {r.status_code}: {r.text[:500]}",
+        if r.status_code == 200:
+            return r.json()
+
+        # OSRM returns 400 for client-routable failures like NoRoute / NoSegment.
+        # These are not server errors — they mean the graph can't connect the points.
+        if r.status_code == 400:
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            osrm_code = body.get("code", "")
+            if osrm_code in ("NoRoute", "NoSegment"):
+                logger.info("OSRM %s between %d stops", osrm_code, len(stops))
+                return None
+
+        # Anything else is a genuine upstream failure
+        service_unavailable(
+            "osrm_error",
+            f"OSRM returned {r.status_code}: {r.text[:500]}",
+        )
+
+    # ── Detour waypoint generation ────────────────────────────
+
+    @staticmethod
+    def _detour_waypoints(
+        start: TripStop,
+        end: TripStop,
+        zones: List[AvoidZoneRequest],
+    ) -> List[TripStop]:
+        """
+        Generate intermediate via-waypoints that steer the route around
+        each avoid zone.
+
+        For each zone that lies roughly between start and end, we create
+        a waypoint offset perpendicular to the start→end bearing, placed
+        just outside the zone radius.  This gives OSRM a concrete path
+        that avoids the hazard area.
+        """
+        if not zones:
+            return []
+
+        s_lat = math.radians(start.lat)
+        s_lng = math.radians(start.lng)
+        e_lat = math.radians(end.lat)
+        e_lng = math.radians(end.lng)
+
+        # Bearing from start to end
+        d_lng = e_lng - s_lng
+        x = math.cos(e_lat) * math.sin(d_lng)
+        y = (
+            math.cos(s_lat) * math.sin(e_lat)
+            - math.sin(s_lat) * math.cos(e_lat) * math.cos(d_lng)
+        )
+        bearing = math.atan2(x, y)
+
+        detours: List[Tuple[float, TripStop]] = []
+        for z in zones:
+            # Only create a detour for zones that are between start and end
+            # (project zone centre onto the start→end line)
+            d_start = _haversine_km(start.lat, start.lng, z.lat, z.lng)
+            d_end = _haversine_km(end.lat, end.lng, z.lat, z.lng)
+            total = _haversine_km(start.lat, start.lng, end.lat, end.lng)
+            if total < 1:
+                continue
+            # Zone is roughly "between" if both distances are < total + some slack
+            if d_start > total * 1.3 or d_end > total * 1.3:
+                continue
+
+            # Offset perpendicular to bearing, just outside zone radius
+            offset_km = z.radius_km + 5.0  # 5 km buffer beyond zone edge
+            # Angular distance in radians
+            angular = offset_km / 6371.0
+
+            # Perpendicular bearing (try the side closer to start→end midpoint)
+            perp_bearing = bearing + math.pi / 2
+
+            # Compute offset point from zone centre
+            z_lat = math.radians(z.lat)
+            z_lng = math.radians(z.lng)
+
+            wp_lat = math.asin(
+                math.sin(z_lat) * math.cos(angular)
+                + math.cos(z_lat) * math.sin(angular) * math.cos(perp_bearing)
+            )
+            wp_lng = z_lng + math.atan2(
+                math.sin(perp_bearing) * math.sin(angular) * math.cos(z_lat),
+                math.cos(angular) - math.sin(z_lat) * math.sin(wp_lat),
             )
 
-        data = r.json()
+            wp = TripStop(
+                type="via",
+                lat=math.degrees(wp_lat),
+                lng=math.degrees(wp_lng),
+            )
+
+            # Sort key = distance from start so waypoints are in route order
+            detours.append((d_start, wp))
+
+        detours.sort(key=lambda t: t[0])
+        return [wp for _, wp in detours]
+
+    # ── Main route method ─────────────────────────────────────
+
+    def route(self, req: NavRequest) -> NavPack:
+        if len(req.stops) < 2:
+            bad_request("bad_nav_request", "stops must contain at least 2 points")
+
+        has_avoid = bool(req.avoid_zones)
+        warnings: List[str] = []
+
+        # 1) Primary OSRM call (with alternatives when avoid zones present)
+        data = self._call_osrm(
+            req.stops, alternatives=3 if has_avoid else 0,
+        )
+
+        # 2) If NoRoute and we have avoid zones, try routing via detour waypoints
+        if data is None and has_avoid:
+            logger.info("NoRoute with avoid zones — attempting detour waypoints")
+            detour_wps = self._detour_waypoints(
+                req.stops[0], req.stops[-1], req.avoid_zones,
+            )
+            if detour_wps:
+                detour_stops = [req.stops[0]] + detour_wps + [req.stops[-1]]
+                data = self._call_osrm(detour_stops, alternatives=0)
+                if data is not None:
+                    warnings.append(
+                        "Route diverted around hazard zone(s). "
+                        "Check conditions before travelling."
+                    )
+
+        # 3) If still no route, fall back to routing without avoid zones
+        if data is None and has_avoid:
+            logger.info("Detour failed — falling back to direct route (no avoidance)")
+            data = self._call_osrm(req.stops, alternatives=0)
+            if data is not None:
+                warnings.append(
+                    "Could not find a route avoiding all hazard zones. "
+                    "This route may pass through warned areas — check "
+                    "conditions before travelling."
+                )
+
+        # 4) Still nothing — hard fail
+        if data is None:
+            service_unavailable(
+                "osrm_no_route",
+                "No route could be found between the given points",
+            )
+
         routes = data.get("routes") or []
         if not routes:
             service_unavailable("osrm_no_routes", "OSRM returned no routes")
@@ -320,4 +469,5 @@ class Routing:
             req=req,
             primary=primary,
             alternates=RouteAlternates(alternates=alternates),
+            warnings=warnings,
         )

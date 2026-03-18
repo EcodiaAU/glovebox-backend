@@ -167,25 +167,45 @@ async def build_bundle(
         bad_request("bad_bundle_request", "geometry required")
 
     profile = req.profile or "drive"
-    buffer_m = int(req.buffer_m or 15000)
-    max_edges = int(req.max_edges or 350000)
+    buffer_m = int(req.buffer_m or 5000)
+    max_edges = int(req.max_edges or 2000000)
 
-    # 1) Ensure corridor exists
+    # 1) Fetch places FIRST — we need stop coordinates for the corridor.
+    #    search_bundle is sync (httpx.Client) so run in thread executor.
+    loop = asyncio.get_event_loop()
+    ppack = None
+    try:
+        ppack = await loop.run_in_executor(
+            None, lambda: places.search_bundle(polyline6=req.geometry)
+        )
+    except Exception as exc:
+        logger.warning("bundle places fetch failed (non-fatal): %s", exc)
+
+    # Extract stop coordinates for corridor building
+    stop_coords: list[tuple[float, float]] = []
+    if ppack and hasattr(ppack, "items") and ppack.items:
+        for item in ppack.items:
+            stop_coords.append((item.lat, item.lng))
+    logger.info("corridor stop_coords: %d from places (ppack=%s, items=%d)",
+                len(stop_coords), type(ppack).__name__ if ppack else "None",
+                len(ppack.items) if ppack and hasattr(ppack, "items") and ppack.items else 0)
+
+    # 2) Build corridor using stop locations + route spine
+    logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
     ensure_result = corridor.ensure(
         route_key=req.route_key,
         route_polyline6=req.geometry,
         profile=profile,
         buffer_m=buffer_m,
         max_edges=max_edges,
+        stop_coords=stop_coords,
     )
     cmeta = ensure_result.meta
     cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
     if not cpack:
         not_found("corridor_missing", f"no corridor pack found for {cmeta.corridor_key}")
 
-    # 2) All overlays — run concurrently, handle individual failures gracefully.
-    # search_bundle is sync (httpx.Client) so run in thread executor.
-    loop = asyncio.get_event_loop()
+    # 3) All remaining overlays — run concurrently.
 
     async def _safe(coro_or_awaitable, name: str):
         """Await a coroutine; return None and log on any exception."""
@@ -226,7 +246,6 @@ async def build_bundle(
         )
 
     (
-        ppack,
         tpack,
         hpack,
         wpack,
@@ -244,7 +263,6 @@ async def build_bundle(
         school_zones_pack,
         roadkill_pack,
     ) = await asyncio.gather(
-        _safe(loop.run_in_executor(None, lambda: places.search_bundle(polyline6=req.geometry)), "places"),
         _safe(traffic.poll(bbox=cpack.bbox), "traffic"),
         _safe(hazards.poll(bbox=cpack.bbox), "hazards"),
         _safe(_maybe_weather(), "weather"),

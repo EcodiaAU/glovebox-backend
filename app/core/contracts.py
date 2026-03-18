@@ -119,6 +119,7 @@ class NavPack(BaseModel):
     req: NavRequest
     primary: NavRoute
     alternates: RouteAlternates = Field(default_factory=RouteAlternates)
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────
