@@ -7,11 +7,12 @@ Problem: Multiple services (places, rest_areas, speed_cameras) all hit
 Overpass simultaneously during trip enrichment, causing 429s, timeouts,
 and 403s from exhausting all instances.
 
-Solution: A single global gate that:
-  - Limits concurrent Overpass requests (semaphore)
-  - Rotates through instances round-robin per request (not per retry)
+Solution: A SINGLE global gate (threading.Semaphore) shared by both
+sync (places.py thread pool) and async (overlays) callers:
+  - Limits total concurrent Overpass requests across ALL services
+  - Rotates through instances round-robin
   - Enforces minimum spacing between requests to the same instance
-  - Provides both sync and async interfaces
+  - Fast connect timeout (3s) so dead instances fail quickly
 
 Usage:
     from app.core.overpass import overpass_fetch, overpass_fetch_sync
@@ -38,27 +39,27 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────
 
-# Max concurrent Overpass requests across ALL services.
-# Overpass.de allows ~2 concurrent per IP; with 3 instances, 6 is safe
-# as requests get distributed across instances.
+# Max concurrent Overpass requests across ALL services (sync + async).
+# With 3 instances allowing ~2 concurrent each = 6 total is safe.
 _MAX_CONCURRENT = 6
 
 # Minimum seconds between requests to the SAME instance.
-_MIN_INSTANCE_SPACING_S = 0.5
+_MIN_INSTANCE_SPACING_S = 0.3
 
 # Retryable HTTP status codes.
 _RETRYABLE = frozenset({429, 502, 503, 504})
 
 # ── State ─────────────────────────────────────────────────────
 
-_async_semaphore: Optional[asyncio.Semaphore] = None
-_sync_lock = threading.Semaphore(_MAX_CONCURRENT)
+# SINGLE unified semaphore — shared by sync and async callers.
+# This prevents sync places queries from starving async overlay queries.
+_global_sem = threading.Semaphore(_MAX_CONCURRENT)
 
 # Per-instance last-request timestamp (thread-safe via _timing_lock).
 _timing_lock = threading.Lock()
 _instance_last_ts: Dict[str, float] = {}
 
-# Round-robin counter (thread-safe via atomicity of int increment).
+# Round-robin counter.
 _robin_counter = 0
 _robin_lock = threading.Lock()
 
@@ -92,26 +93,6 @@ def _wait_for_instance(url: str) -> None:
         _instance_last_ts[host] = time.monotonic()
 
 
-async def _async_wait_for_instance(url: str) -> None:
-    """Async version — yields to event loop while waiting."""
-    host = url.split("/")[2]
-    with _timing_lock:
-        last = _instance_last_ts.get(host, 0.0)
-    wait = _MIN_INSTANCE_SPACING_S - (time.monotonic() - last)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    with _timing_lock:
-        _instance_last_ts[host] = time.monotonic()
-
-
-def _get_async_semaphore() -> asyncio.Semaphore:
-    """Lazy-init the async semaphore (must be in a running event loop)."""
-    global _async_semaphore
-    if _async_semaphore is None:
-        _async_semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
-    return _async_semaphore
-
-
 # ── Public API: async ─────────────────────────────────────────
 
 async def overpass_fetch(
@@ -123,39 +104,49 @@ async def overpass_fetch(
     """
     Execute an Overpass QL query with global concurrency control.
 
-    Raises on total failure after exhausting all instances.
+    Uses the shared threading.Semaphore via run_in_executor to avoid
+    blocking the event loop while waiting for a slot.
     """
-    timeout = timeout_s or float(getattr(settings, "overpass_timeout_s", 90))
+    timeout = timeout_s or float(getattr(settings, "overpass_timeout_s", 25))
     urls = _get_urls()
     attempts = len(urls)
-    sem = _get_async_semaphore()
     last_exc: Optional[Exception] = None
 
     for i in range(attempts):
         url = _next_url()
 
-        async with sem:
-            await _async_wait_for_instance(url)
+        # Acquire the shared semaphore in a thread to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _global_sem.acquire)
+        try:
+            # Instance spacing (non-blocking sleep)
             host = url.split("/")[2]
+            with _timing_lock:
+                last = _instance_last_ts.get(host, 0.0)
+            wait = _MIN_INSTANCE_SPACING_S - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            with _timing_lock:
+                _instance_last_ts[host] = time.monotonic()
+
             try:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout, connect=3.0),
                     follow_redirects=True,
                 ) as client:
+                    t0 = time.monotonic()
                     resp = await client.post(url, data={"data": ql})
+                    elapsed = time.monotonic() - t0
+                    logger.info("[overpass] %s %s → %d in %.1fs", label, host, resp.status_code, elapsed)
 
                 if resp.status_code in _RETRYABLE:
-                    logger.warning(
-                        "[overpass] %s %s returned %d, rotating to next instance",
-                        label, host, resp.status_code,
-                    )
                     last_exc = httpx.HTTPStatusError(
                         f"{resp.status_code}", request=resp.request, response=resp,
                     )
                     continue
 
                 if resp.status_code == 403:
-                    logger.warning("[overpass] %s %s returned 403, skipping instance", label, host)
+                    logger.warning("[overpass] %s %s returned 403, skipping", label, host)
                     last_exc = httpx.HTTPStatusError(
                         "403", request=resp.request, response=resp,
                     )
@@ -167,14 +158,10 @@ async def overpass_fetch(
             except httpx.HTTPStatusError:
                 raise
             except Exception as e:
-                logger.warning(
-                    "[overpass] %s %s error: %s, rotating to next instance",
-                    label, host, type(e).__name__,
-                )
+                logger.warning("[overpass] %s %s error: %s", label, host, type(e).__name__)
                 last_exc = e
-                # Brief pause before trying the next instance to avoid
-                # hammering all instances in quick succession after a timeout.
-                await asyncio.sleep(1.0)
+        finally:
+            _global_sem.release()
 
     raise last_exc or RuntimeError(f"[overpass] {label}: all instances failed")
 
@@ -190,9 +177,10 @@ def overpass_fetch_sync(
     """
     Synchronous version for use in thread pools.
 
-    Uses a threading.Semaphore for the same global concurrency limit.
+    Shares the same _global_sem with the async path — this prevents
+    sync places queries from starving async overlay queries.
     """
-    timeout = timeout_s or float(getattr(settings, "overpass_timeout_s", 90))
+    timeout = timeout_s or float(getattr(settings, "overpass_timeout_s", 25))
     urls = _get_urls()
     attempts = len(urls)
     last_exc: Optional[Exception] = None
@@ -200,7 +188,7 @@ def overpass_fetch_sync(
     for i in range(attempts):
         url = _next_url()
 
-        _sync_lock.acquire()
+        _global_sem.acquire()
         try:
             _wait_for_instance(url)
             host = url.split("/")[2]
@@ -209,20 +197,19 @@ def overpass_fetch_sync(
                     timeout=httpx.Timeout(timeout, connect=3.0),
                     follow_redirects=True,
                 ) as client:
+                    t0 = time.monotonic()
                     resp = client.post(url, data={"data": ql})
+                    elapsed = time.monotonic() - t0
+                    logger.info("[overpass] %s %s → %d in %.1fs", label, host, resp.status_code, elapsed)
 
                 if resp.status_code in _RETRYABLE:
-                    logger.warning(
-                        "[overpass] %s %s returned %d, rotating to next instance",
-                        label, host, resp.status_code,
-                    )
                     last_exc = httpx.HTTPStatusError(
                         f"{resp.status_code}", request=resp.request, response=resp,
                     )
                     continue
 
                 if resp.status_code == 403:
-                    logger.warning("[overpass] %s %s returned 403, skipping instance", label, host)
+                    logger.warning("[overpass] %s %s returned 403, skipping", label, host)
                     last_exc = httpx.HTTPStatusError(
                         "403", request=resp.request, response=resp,
                     )
@@ -234,14 +221,9 @@ def overpass_fetch_sync(
             except httpx.HTTPStatusError:
                 raise
             except Exception as e:
-                logger.warning(
-                    "[overpass] %s %s error: %s, rotating to next instance",
-                    label, host, type(e).__name__,
-                )
+                logger.warning("[overpass] %s %s error: %s", label, host, type(e).__name__)
                 last_exc = e
-                # Brief pause before trying the next instance
-                time.sleep(1.0)
         finally:
-            _sync_lock.release()
+            _global_sem.release()
 
     raise last_exc or RuntimeError(f"[overpass] {label}: all instances failed")
