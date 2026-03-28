@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.core.contracts import CoverageGap, CoverageOverlay, CoveragePoint, CoverageLevel
 from app.core.polyline6 import decode_polyline6

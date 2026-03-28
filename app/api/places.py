@@ -188,7 +188,7 @@ def places_corridor(
         not_found("corridor_missing", f"no corridor pack found for {req.corridor_key}")
 
     preq = PlacesRequest(
-        bbox=cpack.bbox,
+        bbox=cpack.bbox,  # type: ignore[union-attr]
         categories=cats,
         limit=limit,
     )
@@ -217,7 +217,7 @@ def places_suggest(
         )
     except ValueError as exc:
         bad_request("invalid_geometry", str(exc))
-    return PlacesSuggestResponse(clusters=clusters)
+    return PlacesSuggestResponse(clusters=clusters)  # type: ignore[arg-type]
 
 
 # ──────────────────────────────────────────────────────────────

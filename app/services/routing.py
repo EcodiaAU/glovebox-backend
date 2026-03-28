@@ -274,6 +274,7 @@ class Routing:
             r = self.client.get(url, params=params)
         except Exception as e:
             service_unavailable("osrm_unreachable", f"OSRM request failed: {e}")
+            return None  # unreachable; satisfies mypy
 
         if r.status_code == 200:
             return r.json()
@@ -295,6 +296,7 @@ class Routing:
             "osrm_error",
             f"OSRM returned {r.status_code}: {r.text[:500]}",
         )
+        return None  # unreachable; satisfies mypy
 
     # ── Detour waypoint generation ────────────────────────────
 
@@ -423,7 +425,7 @@ class Routing:
                 "No route could be found between the given points",
             )
 
-        routes = data.get("routes") or []
+        routes = data.get("routes") or []  # type: ignore[union-attr]
         if not routes:
             service_unavailable("osrm_no_routes", "OSRM returned no routes")
 

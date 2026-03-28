@@ -17,8 +17,6 @@ import logging
 import httpx
 from pydantic import ValidationError
 
-logger = logging.getLogger(__name__)
-
 from app.core.settings import settings
 from app.core.contracts import (
     PlacesRequest,
@@ -35,6 +33,8 @@ from app.core.contracts import (
     GuideTurnResponse,
 )
 from app.services.guide_search import web_search
+
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -131,7 +131,7 @@ def _format_wildlife_summary(wildlife: Dict[str, Any] | None) -> str:
 def _format_weather_summary(weather: Dict[str, Any] | None) -> str:
     if not weather:
         return ""
-    lines = [f"## Weather Along Route"]
+    lines = ["## Weather Along Route"]
     temp = weather.get("temp_range_c")
     if temp:
         lines.append(f"Temperature: {temp}°C")
@@ -375,7 +375,7 @@ def _build_system_prompt(
     else:
         tool_notes.append("⚠️ No corridor_key - use places_search instead of places_corridor")
     if ctx.geometry:
-        tool_notes.append(f"✅ geometry available - places_suggest works")
+        tool_notes.append("✅ geometry available - places_suggest works")
     else:
         tool_notes.append("⚠️ No geometry - places_suggest unavailable")
 
@@ -654,8 +654,8 @@ class GuideService:
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
         # Log payload size for debugging context window issues
-        sys_chars = len(body["messages"][0]["content"])
-        usr_chars = len(body["messages"][1]["content"])
+        sys_chars = len(body["messages"][0]["content"])  # type: ignore[index]
+        usr_chars = len(body["messages"][1]["content"])  # type: ignore[index]
         est_tokens = (sys_chars + usr_chars) // 3  # rough char-to-token estimate
         logger.info("Guide LLM call: sys=%d chars, user=%d chars, ~%d tokens input", sys_chars, usr_chars, est_tokens)
 
@@ -752,7 +752,7 @@ class GuideService:
             if tool not in ("places_search", "places_corridor", "places_suggest"):
                 logger.warning("Guide: dropping unknown tool: %s (raw tc: %s)", tool, json.dumps(tc)[:300])
             else:
-                fixed_req = _repair_req(tool, req_obj, req.context)
+                fixed_req = _repair_req(tool, req_obj, req.context)  # type: ignore[arg-type]
                 ok, err = _validate_tool_req(tool, fixed_req)
                 if ok:
                     validated_calls.append({"id": tc_id, "tool": tool, "req": fixed_req})

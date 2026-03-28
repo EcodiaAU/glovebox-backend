@@ -90,7 +90,7 @@ def _compute_safety(
         ]
         if major_blocks:
             n = len(major_blocks)
-            deduct = min(2 + max(0, n - 1), 3)  # 2 for 1st, +1 more for 2+, max -3
+            deduct: float = min(2 + max(0, n - 1), 3)  # 2 for 1st, +1 more for 2+, max -3
             score -= deduct
             factors.append(f"{n} major traffic event(s) blocking route")
 
@@ -240,7 +240,7 @@ def _compute_conditions(
         closures = [e for e in traffic.items if e.type == "closure"]
         roadworks = [e for e in traffic.items if e.type == "roadworks"]
         if closures:
-            deduct = min(len(closures), 2)  # -1 per closure, max -2
+            deduct: float = min(len(closures), 2)  # -1 per closure, max -2
             score -= deduct
             factors.append(f"{len(closures)} road closure(s) affecting conditions")
         if roadworks:
@@ -297,7 +297,7 @@ def _compute_conditions(
         # -1 for poor visibility < 1000m
         vis_pts = [p for p in pts if p.visibility_m is not None and p.visibility_m < 1000]
         if vis_pts:
-            min_vis = min(p.visibility_m for p in vis_pts)
+            min_vis = min(v for p in vis_pts if (v := p.visibility_m) is not None)
             score -= 1
             factors.append(f"Poor visibility ({min_vis:.0f}m) at {len(vis_pts)} point(s)")
 

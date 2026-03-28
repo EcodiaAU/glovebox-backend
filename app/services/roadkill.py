@@ -203,7 +203,7 @@ async def _fetch_observations(
     }
 
     try:
-        resp = await client.get(_ROADKILL_URL, params=params, timeout=_HTTP_TIMEOUT)
+        resp = await client.get(_ROADKILL_URL, params=params, timeout=_HTTP_TIMEOUT)  # type: ignore[arg-type]
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:

@@ -62,7 +62,8 @@ async def merge_trip_count(
         .execute()
     )
 
-    server_count = (existing.data or {}).get("trips_used", 0) if existing.data else 0
+    _data: dict = existing.data if existing and isinstance(existing.data, dict) else {}  # type: ignore[assignment]
+    server_count: int = int(_data.get("trips_used", 0))
     merged = max(server_count, local_count)
 
     if merged > server_count:

@@ -22,7 +22,7 @@ from app.core.polyline6 import decode_polyline6
 from app.core.settings import settings
 from app.core.storage import get_rest_area_pack, put_rest_area_pack
 from app.core.time import utc_now_iso
-from app.core.geo import bbox_from_coords, haversine_km, min_dist_to_route_with_km, RouteGrid
+from app.core.geo import bbox_from_coords, haversine_km, RouteGrid
 from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh
 
@@ -174,7 +174,10 @@ out center tags;"""
 # ──────────────────────────────────────────────────────────────
 
 def _tag_bool(tags: Dict[str, str], key: str) -> Optional[bool]:
-    v = tags.get(key, "").lower()
+    v = tags.get(key, "")
+    if isinstance(v, bool):
+        return v
+    v = str(v).lower()
     if v in ("yes", "true", "1"):
         return True
     if v in ("no", "false", "0"):
@@ -218,7 +221,6 @@ def _parse_element(el: Dict[str, Any]) -> Optional[RestArea]:
         return None
 
     # Build stable ID from source + type + coords
-    osm_id = f"{el.get('type','x')}/{el.get('id', 0)}"
     stable_id_raw = f"overpass::{osm_type}::{round(float(lat), 5)}::{round(float(lng), 5)}"
     h = hashlib.sha256(stable_id_raw.encode()).digest()
     stable_id = base64.urlsafe_b64encode(h).decode("ascii").rstrip("=")[:20]
@@ -257,7 +259,7 @@ def _parse_element(el: Dict[str, Any]) -> Optional[RestArea]:
         name=tags.get("name") or tags.get("ref") or None,
         lat=float(lat),
         lng=float(lng),
-        type=osm_type,
+        type=osm_type,  # type: ignore[arg-type]
         quality_score=score,
         facilities=fac,
         opening_hours=tags.get("opening_hours") or None,
@@ -305,7 +307,7 @@ async def _preload_gov_data() -> None:
             if isinstance(results[i], Exception):
                 logger.warning("rest_areas: preload %s failed: %r", label, results[i])
             else:
-                logger.info("rest_areas: preload %s → %d areas", label, len(results[i]))
+                logger.info("rest_areas: preload %s → %d areas", label, len(results[i]))  # type: ignore[arg-type]
     except Exception as e:
         logger.warning("rest_areas: preload failed: %r", e)
 
@@ -777,13 +779,6 @@ def _read_supabase_rest_areas(
 
         import httpx as _httpx
         cats = ",".join(_REST_CATEGORIES)
-        params = {
-            "select": "osm_type,osm_id,lat,lng,name,category,tags",
-            "lat": f"gte.{min_lat}",
-            "lng": f"gte.{min_lng}",
-            "category": f"in.({cats})",
-            "limit": "2000",
-        }
         # PostgREST needs separate params for range filters
         url = f"{supa_url}/rest/v1/roam_places_items"
         headers = {
@@ -924,7 +919,7 @@ def _place_item_to_rest_area(item: Dict[str, Any]) -> Optional[RestArea]:
         name=item.get("name") or tags.get("name") or tags.get("ref") or None,
         lat=float(lat),
         lng=float(lng),
-        type=osm_type,
+        type=osm_type,  # type: ignore[arg-type]
         quality_score=score,
         facilities=fac,
         opening_hours=tags.get("opening_hours") or None,
@@ -982,7 +977,7 @@ class RestAreas:
         route_total_km = samples[-1][2] if samples else 0.0
 
         # Build bbox around route
-        min_lat, min_lng, max_lat, max_lng = bbox_from_coords(samples, buffer_km)
+        min_lat, min_lng, max_lat, max_lng = bbox_from_coords(samples, buffer_km)  # type: ignore[arg-type]
 
         warnings: List[str] = []
         raw_areas: List[RestArea] = []
@@ -1034,7 +1029,7 @@ class RestAreas:
                 # Fallback 2: direct Overpass query (last resort)
                 ql = _build_overpass_query(min_lat, min_lng, max_lat, max_lng)
                 try:
-                    overpass_result = await _fetch_overpass(client=None, ql=ql)
+                    overpass_result = await _fetch_overpass(client=None, ql=ql)  # type: ignore[arg-type]
                 except Exception as e:
                     logger.warning("rest_areas: Overpass query failed: %r", e)
                     warnings.append(f"Overpass query failed: {e}")

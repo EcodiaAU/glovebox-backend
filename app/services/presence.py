@@ -142,7 +142,7 @@ class Presence:
                 last_pinged_at=r["pinged_at"],
                 predicted_at=utc_now_iso(),
                 distance_km=round(dist, 2),
-                confidence=_confidence(elapsed_s),
+                confidence=_confidence(elapsed_s),  # type: ignore[arg-type]
             ))
 
         results.sort(key=lambda r: r.distance_km)

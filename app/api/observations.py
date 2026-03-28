@@ -53,7 +53,7 @@ def nearby_observations(
         lat=req.lat,
         lng=req.lng,
         radius_km=req.radius_km,
-        types=req.types,
+        types=req.types,  # type: ignore[arg-type]
         since_iso=req.since_iso,
     )
     return NearbyObservationsResponse(observations=aggregated)

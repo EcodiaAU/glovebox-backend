@@ -100,7 +100,7 @@ def _route_intersects_warning_catchments(
         pt = Point(lng, lat)
         for shape in shapes:
             try:
-                if shape.contains(pt):
+                if shape.contains(pt):  # type: ignore[attr-defined]
                     return True
             except Exception:
                 continue
@@ -453,8 +453,8 @@ async def _fetch_gauge(
         data_owner=station["data_owner"],
         latest_height_m=round(latest_val, 3),
         reading_time_iso=latest_ts,
-        trend=trend,
-        severity=severity,
+        trend=trend,  # type: ignore[arg-type]
+        severity=severity,  # type: ignore[arg-type]
     )
 
 
@@ -666,21 +666,21 @@ class Flood:
         for r in gauge_results:
             if isinstance(r, FloodGauge):
                 gauges.append(r)
-            elif isinstance(r, Exception):
+            elif isinstance(r, (Exception, BaseException)):
                 warnings.append(f"flood:gauge fetch error: {r}")
 
-        if isinstance(catchments, Exception):
+        if isinstance(catchments, (Exception, BaseException)):
             warnings.append(f"flood:catchments fetch error: {catchments}")
             catchments = []
 
-        if isinstance(qld_flood_cameras, Exception):
+        if isinstance(qld_flood_cameras, (Exception, BaseException)):
             warnings.append(f"flood:qld_flood_cameras error: {qld_flood_cameras}")
             qld_flood_cameras = []
 
         # ── Route-passes-through-warning check ───────────────────────
         route_passes_through_warning = False
         if route_coords and catchments:
-            warning_catchments = [c for c in catchments if c.level == "warning"]
+            warning_catchments = [c for c in catchments if c.level == "warning"]  # type: ignore[union-attr]
             if warning_catchments:
                 route_passes_through_warning = _route_intersects_warning_catchments(
                     route_coords, warning_catchments
@@ -701,8 +701,8 @@ class Flood:
             algo_version=algo_version,
             created_at=utc_now_iso(),
             gauges=gauges,
-            catchments=catchments,
-            flood_cameras=list(qld_flood_cameras),
+            catchments=catchments,  # type: ignore[arg-type]
+            flood_cameras=list(qld_flood_cameras),  # type: ignore[arg-type]
             attributions=attributions,
             warnings=warnings,
             route_passes_through_warning=route_passes_through_warning,

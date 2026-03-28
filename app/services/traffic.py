@@ -1176,14 +1176,12 @@ class _VicEmergencyProvider:
         bb = _bbox_from_geom(geojson_geom) if geojson_geom else None
 
         # Derive point for dedup key
-        lat: Optional[float] = None
-        lng: Optional[float] = None
         if geojson_geom:
             raw_coords = geojson_geom.get("coordinates")
             gtype = geojson_geom.get("type")
             if gtype == "Point" and isinstance(raw_coords, list) and len(raw_coords) >= 2:
                 try:
-                    lng, lat = float(raw_coords[0]), float(raw_coords[1])
+                    _lng, _lat = float(raw_coords[0]), float(raw_coords[1])
                 except (TypeError, ValueError):
                     pass
 
@@ -1351,20 +1349,20 @@ class _WaIncidentsProvider:
         geojson_geom: Optional[Dict[str, Any]] = geom if isinstance(geom, dict) else None
 
         # Derive point geometry for bbox / midpoint
-        point_coords: Optional[List[float]] = None
+        _point_coords: Optional[List[float]] = None
         if isinstance(geojson_geom, dict):
             gtype = geojson_geom.get("type")
             raw_coords = geojson_geom.get("coordinates")
             if gtype == "Point" and isinstance(raw_coords, list) and len(raw_coords) >= 2:
                 try:
-                    point_coords = [float(raw_coords[0]), float(raw_coords[1])]
+                    _point_coords = [float(raw_coords[0]), float(raw_coords[1])]
                 except (ValueError, TypeError):
                     pass
             elif gtype == "LineString" and isinstance(raw_coords, list) and raw_coords:
                 try:
                     pairs = [[float(c[0]), float(c[1])] for c in raw_coords if len(c) >= 2]
                     if pairs:
-                        point_coords = self._midpoint(pairs)
+                        _point_coords = self._midpoint(pairs)
                 except (ValueError, TypeError, IndexError):
                     pass
 

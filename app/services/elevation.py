@@ -225,7 +225,7 @@ class Elevation:
                 "locations": points,
             }
 
-            resp = self.client.get(_OT_URL, params=params)
+            resp = self.client.get(_OT_URL, params=params)  # type: ignore[arg-type]
             resp.raise_for_status()
             data = resp.json()
 

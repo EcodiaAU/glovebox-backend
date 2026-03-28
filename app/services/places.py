@@ -8,11 +8,8 @@ import hashlib
 import logging
 import math
 import time
-import random
 import re
 import functools
-
-import httpx
 
 from app.core.contracts import PlaceItem, PlacesPack, PlacesRequest, BBox4, PlaceCategory, StopSuggestionItem
 from app.core.keying import places_key
@@ -2664,9 +2661,6 @@ class Places:
         t1_items: List[PlaceItem] = []
         t2_items: List[PlaceItem] = []
 
-        timeout_s = float(getattr(settings, "overpass_timeout_s", 90))
-        timeout   = httpx.Timeout(timeout_s, connect=15.0)
-
         def _within(it: PlaceItem, buf_m: float) -> bool:
             return (
                 it.id not in seen_ids
@@ -2795,7 +2789,6 @@ class Places:
         # ═══════════════════════════════════════════════════════
 
         ci_cats_set = set(ci_cats)
-        t1_cats_set = set(t1_cats)
         t1_all_cats = list(ci_cats) + list(t1_cats)
         t1_all_cats_set = set(t1_all_cats)
 
@@ -3099,9 +3092,6 @@ class Places:
         # corridors skip Overpass entirely.
         # ──────────────────────────────────────────────────────
 
-        timeout_s = float(getattr(settings, "overpass_timeout_s", 90))
-        timeout = httpx.Timeout(timeout_s, connect=15.0)
-
         ci_cats_in_req = [c for c in _CRITICAL_INFRA_CATS if c in set(categories)]
         non_ci_cats = [c for c in categories if c not in set(_CRITICAL_INFRA_CATS)]
 
@@ -3381,9 +3371,6 @@ class Places:
 
         tiles = self.store.tiles_for_bbox(bbox=bbox, step_deg=tile_step, max_tiles=max_tiles)
 
-        timeout_s = float(getattr(settings, "overpass_timeout_s", 90))
-        timeout = httpx.Timeout(timeout_s, connect=10.0)
-
         started = time.time()
         tiles_fetched = 0
         used_overpass = False
@@ -3407,7 +3394,7 @@ class Places:
                 fetched_items: List[PlaceItem] = []
                 got = 0
                 for el in (data.get("elements") or []):
-                    it = _element_to_item(el)
+                    it = _element_to_item(el)  # type: ignore[assignment]
                     if not it:
                         continue
                     fetched_items.append(it)
@@ -3513,7 +3500,7 @@ class Places:
 
         for (idx, lat, lng, km) in samples:
             preq = PlacesRequest(
-                center={"lat": lat, "lng": lng},
+                center={"lat": lat, "lng": lng},  # type: ignore[arg-type]
                 radius_m=int(radius_m),
                 categories=categories,
                 limit=int(limit_per_sample),

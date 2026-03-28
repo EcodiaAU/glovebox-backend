@@ -31,7 +31,6 @@ import asyncio
 import base64
 import hashlib
 import logging
-import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,7 +40,7 @@ from app.core.contracts import RoadBlackSpot, SpeedCamera, RoadOccupancy, SpeedC
 from app.core.settings import settings
 from app.core.storage import get_cameras_pack, put_cameras_pack
 from app.core.time import utc_now_iso
-from app.core.geo import bbox_from_coords, bbox_overlaps, decode_polyline6, haversine_km, min_dist_to_route, sample_route, RouteGrid
+from app.core.geo import bbox_from_coords, bbox_overlaps, decode_polyline6, sample_route, RouteGrid
 from app.core.http_client import http_client
 from app.core.cache_utils import is_fresh, stable_key
 
@@ -363,9 +362,9 @@ async def _fetch_qld_cameras(
     cameras: List[SpeedCamera] = []
 
     for item in all_cameras:
-        lat, lng = item["lat"], item["lng"]
+        lat, lng = float(item["lat"]), float(item["lng"])
         dist_km = rgrid.dist(lat, lng)
-        location_desc = item.get("location") or "Queensland"
+        location_desc: str = str(item.get("location") or "Queensland")
         if item.get("maxspeed"):
             location_desc = f"{location_desc} ({item['maxspeed']} km/h)".strip(" ()")
             if not item.get("location"):
@@ -472,15 +471,15 @@ async def _fetch_act_cameras(
     cameras: List[SpeedCamera] = []
 
     for item in all_cameras:
-        lat, lng = item["lat"], item["lng"]
+        lat, lng = float(item["lat"]), float(item["lng"])  # type: ignore[arg-type]
         if not (min_lat <= lat <= max_lat and min_lng <= lng <= max_lng):
             continue
         dist_km = rgrid.dist(lat, lng)
         cameras.append(SpeedCamera(
             id=_make_camera_id("act", lat, lng),
             source="act_cameras",
-            camera_type=item.get("camera_type", "fixed_speed"),
-            location_desc=item.get("location") or "ACT",
+            camera_type=str(item.get("camera_type", "fixed_speed")),
+            location_desc=str(item.get("location") or "ACT"),
             lat=lat,
             lng=lng,
             is_school_zone=False,
@@ -509,7 +508,7 @@ async def _fetch_brisbane_occupancies(
 
     try:
         resp = await client.get(
-            settings.brisbane_road_occupancies_url, params=params, timeout=_HTTP_TIMEOUT,
+            settings.brisbane_road_occupancies_url, params=params, timeout=_HTTP_TIMEOUT,  # type: ignore[arg-type]
         )
         resp.raise_for_status()
         data = resp.json()
@@ -758,7 +757,7 @@ class SpeedCameras:
             # Black spots are SQLite-cached (7d TTL), fast
             if include_qld:
                 task_labels.append("qld_black_spots")
-                tasks.append(_fetch_qld_black_spots(
+                tasks.append(_fetch_qld_black_spots(  # type: ignore[arg-type]
                     client, self.conn, min_lat, min_lng, max_lat, max_lng,
                     rgrid, warnings,
                 ))
@@ -777,7 +776,7 @@ class SpeedCameras:
 
         if overpass_data:
             seen: set = set()
-            for el in overpass_data.get("elements") or []:
+            for el in overpass_data.get("elements") or []:  # type: ignore[union-attr]
                 lat = _parse_float(el.get("lat"))
                 lng = _parse_float(el.get("lon"))
                 if lat is None or lng is None:

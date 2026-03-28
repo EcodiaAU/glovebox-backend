@@ -226,7 +226,7 @@ class Corridor:
             # Deduplicate: group stops by nearest spine point on a ~1km grid.
             # Keep only the furthest stop per grid cell - its OSRM route
             # covers the roads for closer stops too.
-            stop_routes: Dict[Tuple[float, float], Tuple[float, float, float]] = {}
+            stop_routes: Dict[Tuple[float, float], Tuple[float, float, float, float, float]] = {}
             if stop_coords:
                 for slat, slng in stop_coords:
                     sp_lat, sp_lng = _nearest_spine_point(slat, slng, spine_points)

@@ -115,7 +115,7 @@ async def _fetch_toilets(
     }
 
     try:
-        resp = await client.get(_TOILETS_URL, params=params, timeout=_HTTP_TIMEOUT)
+        resp = await client.get(_TOILETS_URL, params=params, timeout=_HTTP_TIMEOUT)  # type: ignore[arg-type]
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:

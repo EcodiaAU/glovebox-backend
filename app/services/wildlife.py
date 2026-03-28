@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from app.core.contracts import WildlifeOverlay, WildlifeZone
 from app.core.polyline6 import decode_polyline6
@@ -92,7 +92,7 @@ def _build_zone(
         lng=lng,
         km_from=max(0.0, km_along - half),
         km_to=km_along + half,
-        risk_level=risk,
+        risk_level=risk,  # type: ignore[arg-type]
         dominant_species=dominant,
         occurrence_count=count,
         is_twilight_risk=False,  # iNaturalist has no time-of-day metadata

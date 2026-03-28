@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Weather overlay service for Roam.
 
@@ -18,10 +16,9 @@ Algorithm
 6. Derive sunrise/sunset, twilight danger, WMO weather description.
 7. Cache the result for weather_cache_seconds (default 1 hour).
 """
+from __future__ import annotations
 
-import asyncio
 import logging
-import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
@@ -183,7 +180,7 @@ async def _fetch_batch(
         params["apikey"] = api_key
 
     try:
-        resp = await client.get(f"{base_url}/v1/forecast", params=params, timeout=30.0)
+        resp = await client.get(f"{base_url}/v1/forecast", params=params, timeout=30.0)  # type: ignore[arg-type]
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:
@@ -192,14 +189,22 @@ async def _fetch_batch(
 
 
 def _parse_iso_local(s: str) -> Optional[datetime]:
-    """Parse an ISO datetime string from Open-Meteo (may lack timezone)."""
+    """Parse an ISO datetime string from Open-Meteo (may lack timezone).
+
+    Open-Meteo returns local times for the queried location when
+    ``timezone=auto``. These strings are typically naive (no offset).
+    We assume AEST (UTC+10) for naive strings to stay consistent with
+    the departure time parsing above. This is accurate for most of
+    eastern Australia and only ±0.5-2h off for other AU timezones.
+    """
+    _AEST = timezone(timedelta(hours=10))
     try:
         s = s.strip()
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=_AEST)
         return dt
     except Exception:
         return None
@@ -365,16 +370,23 @@ class Weather:
             if is_fresh(created_at, max_age_s=max_age):
                 return WeatherOverlay(**cached)
 
-        # Parse departure
+        # Parse departure.
+        # The frontend sends stop depart_at as naive ISO local time (e.g.
+        # "2026-03-20T09:00" meaning 9 AM in the user's local timezone).
+        # Australia spans UTC+8 (AWST) to UTC+10.5 (ACDT), with most of
+        # the outback in AEST (UTC+10). Assuming AEST for naive strings is
+        # far better than the old behaviour of assuming UTC, which shifted
+        # forecasts by 10 hours for east-coast trips.
+        _AEST = timezone(timedelta(hours=10))
         try:
             dep = departure_iso.strip()
             if dep.endswith("Z"):
                 dep = dep[:-1] + "+00:00"
             departure = datetime.fromisoformat(dep)
             if departure.tzinfo is None:
-                departure = departure.replace(tzinfo=timezone.utc)
+                departure = departure.replace(tzinfo=_AEST)
         except Exception:
-            departure = datetime.now(timezone.utc)
+            departure = datetime.now(_AEST)
 
         # Decode geometry
         coords = decode_polyline6(polyline6)

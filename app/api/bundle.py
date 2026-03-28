@@ -191,7 +191,7 @@ async def build_bundle(
             None,
             lambda: places.search_bundle(
                 polyline6=req.geometry,
-                categories=_enabled_cats,
+                categories=_enabled_cats,  # type: ignore[arg-type]
                 density_multiplier=_density_mult,
             ),
         )
@@ -280,8 +280,8 @@ async def build_bundle(
         school_zones_pack,
         roadkill_pack,
     ) = await asyncio.gather(
-        _safe(traffic.poll(bbox=cpack.bbox), "traffic"),
-        _safe(hazards.poll(bbox=cpack.bbox), "hazards"),
+        _safe(traffic.poll(bbox=cpack.bbox), "traffic"),  # type: ignore[union-attr]
+        _safe(hazards.poll(bbox=cpack.bbox), "hazards"),  # type: ignore[union-attr]
         _safe(_maybe_weather(), "weather"),
         _safe(_maybe_coverage(), "coverage"),
         _safe(fuel.along_route(polyline6=req.geometry), "fuel"),

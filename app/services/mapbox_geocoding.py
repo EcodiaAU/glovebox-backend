@@ -121,7 +121,7 @@ def _feature_to_item(feat: dict[str, Any]) -> PlaceItem | None:
         name=name,
         lat=lat,
         lng=lng,
-        category=category,
+        category=category,  # type: ignore[arg-type]
         extra={
             "source": "mapbox_geocoding",
             "mapbox_id": mapbox_id,

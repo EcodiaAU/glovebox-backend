@@ -87,7 +87,7 @@ async def create_checkout_session(
 
     client = _get_stripe()
     session = client.checkout.sessions.create(
-        params={
+        params={  # type: ignore[arg-type]
             "mode": "payment",
             "line_items": [{"price": price_id, "quantity": 1}],
             "metadata": {"supabase_user_id": user.id},

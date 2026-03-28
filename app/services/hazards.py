@@ -418,8 +418,6 @@ def _parse_cap(xml_text: str, source: str, region: str) -> List[HazardEvent]:
     if alert_status == "cancel":
         return out
 
-    alert_msgtype = (_find_first_text(root, "msgType") or "").strip().lower()
-
     for info in [el for el in root.iter() if _localname(el.tag) == "info"]:
         event_name = _find_first_text(info, "event") or None
         headline = _find_first_text(info, "headline") or None
@@ -505,7 +503,7 @@ def _parse_nsw_rfs_json(json_text: str) -> List[HazardEvent]:
         return out
 
     # RFS returns either a dict with "features" or a list
-    features = []
+    features: list = []
     if isinstance(data, dict):
         features = data.get("features") or data.get("incidents") or []
     elif isinstance(data, list):
@@ -522,7 +520,6 @@ def _parse_nsw_rfs_json(json_text: str) -> List[HazardEvent]:
         title = str(props.get("title") or props.get("description") or "NSW Fire Incident").strip()
         desc = str(props.get("description") or props.get("alert_level") or "").strip()
         pub_date = props.get("pubDate") or props.get("updated") or props.get("guid") or None
-        category = str(props.get("category") or props.get("type") or "").lower()
 
         # Determine severity from fire alert level
         alert_level = str(props.get("alert_level") or props.get("alertLevel") or "").lower()
@@ -557,7 +554,7 @@ def _parse_nsw_rfs_json(json_text: str) -> List[HazardEvent]:
                 kind="fire",             # type: ignore
                 severity=sev,            # type: ignore
                 urgency="immediate" if sev == "high" else "expected",  # type: ignore
-                certainty="observed",    # type: ignore - fires are observed events
+                certainty="observed",    # type: ignore[arg-type]
                 effective_priority=_compute_effective_priority(
                     "severe" if sev == "high" else "moderate",
                     "immediate" if sev == "high" else "expected",
@@ -934,7 +931,6 @@ def _parse_wa_dfes_incidents(json_text: str) -> List[HazardEvent]:
         entity_sub = str(inc.get("entitySubType") or "").strip()
         suburbs = inc.get("suburbs") or []
         lga = inc.get("lga") or []
-        dfes_regions = inc.get("dfes-regions") or []
 
         # Build title
         suburb_str = ", ".join(suburbs) if isinstance(suburbs, list) else ""
@@ -1029,7 +1025,7 @@ def _parse_wa_dfes_incidents(json_text: str) -> List[HazardEvent]:
                 ),
                 title=title,
                 description=desc,
-                url=f"https://www.emergency.wa.gov.au/",
+                url="https://www.emergency.wa.gov.au/",
                 issued_at=str(updated_dt) if updated_dt else None,
                 start_at=str(start_dt) if start_dt else None,
                 end_at=None,
@@ -1070,8 +1066,6 @@ def _parse_wa_dfes_warnings(json_text: str) -> List[HazardEvent]:
         headline = str(w.get("headline") or "").strip()
         warning_type = str(w.get("warning-type") or "").strip()
         action = str(w.get("action-statement") or "").strip()
-        cap_cat = str(w.get("cap-category") or "").strip()
-        sorting_priority = w.get("sorting-priority") or 99
         suburbs = w.get("suburbs") or []
         lga = w.get("lga") or []
 
@@ -1167,7 +1161,6 @@ def _parse_wa_dfes_warnings(json_text: str) -> List[HazardEvent]:
 
         # Timestamps
         published = w.get("published-date-time") or None
-        updated = w.get("updatedAt") or published or None
 
         hid = _stable_id(["wa_dfes_warn", w_id or title[:160]])
 
@@ -1226,7 +1219,7 @@ def _parse_dea_hotspots_json(json_text: str, *, bbox: BBox4) -> List[HazardEvent
     except Exception:
         return out
 
-    features = []
+    features: list = []
     if isinstance(data, dict):
         features = data.get("features") or []
     elif isinstance(data, list):
@@ -1287,9 +1280,6 @@ def _parse_dea_hotspots_json(json_text: str, *, bbox: BBox4) -> List[HazardEvent
         state = str(props.get("australian_state") or "").strip()
         fire_cat = str(props.get("fire_category_name") or "").strip()
         satellite = str(props.get("satellite") or "").strip()
-        sensor = str(props.get("sensor") or "").strip()
-        temp_k = props.get("temp_kelvin")
-        power = props.get("power")
         hotspot_dt = str(props.get("datetime") or "").strip()
 
         region = state.lower() if state else None

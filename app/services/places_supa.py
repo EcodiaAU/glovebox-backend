@@ -131,7 +131,7 @@ class SupaPlacesRepo:
 
         url = f"{self.base}/rest/v1/roam_places_items"
         with httpx.Client(timeout=20.0) as client:
-            resp = client.get(url, headers=self._headers(), params=params)
+            resp = client.get(url, headers=self._headers(), params=params)  # type: ignore[arg-type]
             resp.raise_for_status()
             rows = resp.json()
 

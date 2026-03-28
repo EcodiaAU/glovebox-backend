@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -16,17 +17,17 @@ from starlette.middleware.gzip import GZipMiddleware
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-from app.core.settings import settings
-from app.core.storage import connect_sqlite, ensure_schema
-from app.core.edges_db import create_edges_db, EdgesDB
-from app.api import api_router
+from app.core.settings import settings  # noqa: E402
+from app.core.storage import connect_sqlite, ensure_schema  # noqa: E402
+from app.core.edges_db import create_edges_db, EdgesDB  # noqa: E402
+from app.api import api_router  # noqa: E402
 
-from app.services.corridor import Corridor
-from app.services.bundle import Bundle
-from app.services.places import Places
-from app.services.places_store import PlacesStore
-from app.services.rest_areas import RestAreas
-from app.core.http_client import shutdown_http_client
+from app.services.corridor import Corridor  # noqa: E402
+from app.services.bundle import Bundle  # noqa: E402
+from app.services.places import Places  # noqa: E402
+from app.services.places_store import PlacesStore  # noqa: E402
+from app.services.rest_areas import RestAreas  # noqa: E402
+from app.core.http_client import shutdown_http_client  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────
 # Structured logging
@@ -37,12 +38,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# ──────────────────────────────────────────────────────────────
-# Module-level references (populated by lifespan)
-# ──────────────────────────────────────────────────────────────
-
-import sqlite3
 
 _cache_conn: Optional[sqlite3.Connection] = None
 _edges_db: Optional[EdgesDB] = None
@@ -167,7 +162,7 @@ def _register_dependencies(app: FastAPI) -> None:
             service_unavailable("edges_db_unavailable", "Edges database is not available")
         return Corridor(
             cache_conn=_cache_conn,
-            edges_db=_edges_db,
+            edges_db=_edges_db,  # type: ignore[arg-type]
             algo_version=settings.corridor_algo_version,
             osrm_base_url=settings.osrm_base_url,
             osrm_profile="driving",

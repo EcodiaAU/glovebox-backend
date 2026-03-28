@@ -279,6 +279,8 @@ class Bundle:
 
         # compresslevel=1 is fastest DEFLATE (Zlib level 1: speed >> size).
         # JSON compresses well at any level; level 1 is ~3-5× faster than default 6.
+        assert b_nav is not None, "b_nav guaranteed by not_found guard above"
+        assert b_corr is not None, "b_corr guaranteed by not_found guard above"
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as z:
             z.writestr("manifest.json", b_manifest)

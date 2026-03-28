@@ -137,7 +137,7 @@ async def _fetch_nsw_school_zones(
     }
 
     try:
-        resp = await client.get(_SCHOOL_ZONES_URL, params=params, timeout=_HTTP_TIMEOUT)
+        resp = await client.get(_SCHOOL_ZONES_URL, params=params, timeout=_HTTP_TIMEOUT)  # type: ignore[arg-type]
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:

@@ -133,8 +133,8 @@ class Observations:
         return UserObservation(
             id=obs_id,
             user_id=user_id,
-            type=type,
-            severity=severity,
+            type=type,  # type: ignore[arg-type]
+            severity=severity,  # type: ignore[arg-type]
             lat=lat, lng=lng,
             heading_deg=heading_deg,
             message=message,
@@ -223,8 +223,8 @@ class Observations:
                 is_recent = age_hours < 0.5  # within 30 minutes
 
                 results.append(AggregatedObservation(
-                    type=obs_type,
-                    severity=_highest_severity(severities),
+                    type=obs_type,  # type: ignore[arg-type]
+                    severity=_highest_severity(severities),  # type: ignore[arg-type]
                     lat=round(sum(lats) / len(lats), 6),
                     lng=round(sum(lngs) / len(lngs), 6),
                     message=latest.get("message"),
