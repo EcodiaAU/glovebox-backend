@@ -116,9 +116,15 @@ app.add_middleware(
         "http://localhost:3001",
         "http://www.localhost:3001",
         "http://127.0.0.1:3001",
-        # Production
+        # Production - prod actually serves at nav.ecodia.au (roam.ecodia.au
+        # 307s to it). Keep the alias listed so a direct hit at the old
+        # host still works while DNS users transition.
+        "https://nav.ecodia.au",
         "https://roam.ecodia.au",
     ],
+    # Cover Vercel preview deploys + any future *.ecodia.au surface so the
+    # web build doesn't fall over on every rebrand.
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)?(ecodia\.au|vercel\.app)$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
