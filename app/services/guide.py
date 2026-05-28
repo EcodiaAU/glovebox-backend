@@ -3,6 +3,7 @@
 Roam Guide - AI road trip companion for Australia.
 Powered by DeepSeek-V3 via OpenAI-compatible /chat/completions API.
 """
+
 from __future__ import annotations
 
 import json
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 # HELPERS
 # ══════════════════════════════════════════════════════════════
 
+
 def _format_speed(speed_mps: float | None) -> str:
     if speed_mps is None or speed_mps < 0:
         return "unknown"
@@ -63,7 +65,6 @@ def _trip_phase(progress: TripProgress | None, total_km: float | None) -> str:
         return "arriving"
 
 
-
 def _format_route_score(route_score: Dict[str, Any] | None) -> str:
     """Format RouteIntelligenceScore summary dict as a concise system prompt section."""
     if not route_score:
@@ -74,7 +75,7 @@ def _format_route_score(route_score: Dict[str, Any] | None) -> str:
     lines = [f"## Route Intelligence Score\nOverall: {overall}/10 ({label})"]
     worst = route_score.get("worst_category")
     if worst:
-        lines.append(f"Weakest: {worst.get('name','?')} ({worst.get('score',0)}/10)")
+        lines.append(f"Weakest: {worst.get('name', '?')} ({worst.get('score', 0)}/10)")
     for cat in ("safety", "conditions", "services", "weather"):
         c = route_score.get(cat, {})
         if not c:
@@ -98,7 +99,9 @@ def _format_flood_summary(flood: Dict[str, Any] | None) -> str:
         trend = g.get("trend", "")
         height = g.get("height_m")
         h_str = f" ({height:.1f}m)" if height is not None else ""
-        lines.append(f"  • {g.get('name','?')}: {g.get('severity','?')}{h_str} {trend}")
+        lines.append(
+            f"  • {g.get('name', '?')}: {g.get('severity', '?')}{h_str} {trend}"
+        )
     return "\n".join(lines)
 
 
@@ -124,7 +127,9 @@ def _format_wildlife_summary(wildlife: Dict[str, Any] | None) -> str:
     if km_markers:
         lines.append(f"Hotspots: {', '.join(km_markers[:5])}")
     if twilight:
-        lines.append("⚠ Twilight risk - kangaroos active at dawn/dusk along parts of route")
+        lines.append(
+            "⚠ Twilight risk - kangaroos active at dawn/dusk along parts of route"
+        )
     return "\n".join(lines)
 
 
@@ -142,7 +147,9 @@ def _format_weather_summary(weather: Dict[str, Any] | None) -> str:
     if weather.get("windy_sections", 0):
         lines.append(f"High wind: {weather['windy_sections']} section(s)")
     if weather.get("twilight_danger_sections", 0):
-        lines.append(f"Twilight danger: {weather['twilight_danger_sections']} section(s)")
+        lines.append(
+            f"Twilight danger: {weather['twilight_danger_sections']} section(s)"
+        )
     if weather.get("low_visibility_sections", 0):
         lines.append(f"Low visibility: {weather['low_visibility_sections']} section(s)")
     if weather.get("high_uv_sections", 0):
@@ -161,12 +168,16 @@ def _format_conditions(ctx: GuideContext) -> str:
         parts.append(f"Traffic: {ts['total']} events on/near route")
         for s in ts.get("sample", [])[:3]:
             sev = s.get("severity", "")
-            parts.append(f"  • {s.get('type','event')}{' ['+sev.upper()+']' if sev and sev!='unknown' else ''}: {s.get('headline','')[:100]}")
+            parts.append(
+                f"  • {s.get('type', 'event')}{' [' + sev.upper() + ']' if sev and sev != 'unknown' else ''}: {s.get('headline', '')[:100]}"
+            )
     hs = ctx.hazards_summary
     if hs and hs.get("total", 0) > 0:
         parts.append(f"Hazards/Weather: {hs['total']} active warnings")
         for h in hs.get("sample", [])[:3]:
-            parts.append(f"  • {h.get('kind','hazard')}: {h.get('headline','')[:100]}")
+            parts.append(
+                f"  • {h.get('kind', 'hazard')}: {h.get('headline', '')[:100]}"
+            )
     return "\n".join(parts) if parts else "No active traffic or hazard alerts."
 
 
@@ -179,16 +190,34 @@ def _format_places(places: List[WirePlace]) -> str:
         by_cat.setdefault(p.category, []).append(p)
 
     priority = [
-        "fuel", "ev_charging", "rest_area", "water", "mechanic", "hospital",
-        "bakery", "cafe", "restaurant", "fast_food", "pub",
-        "camp", "hotel", "motel",
-        "viewpoint", "waterfall", "swimming_hole", "beach", "national_park", "hiking",
+        "fuel",
+        "ev_charging",
+        "rest_area",
+        "water",
+        "mechanic",
+        "hospital",
+        "bakery",
+        "cafe",
+        "restaurant",
+        "fast_food",
+        "pub",
+        "camp",
+        "hotel",
+        "motel",
+        "viewpoint",
+        "waterfall",
+        "swimming_hole",
+        "beach",
+        "national_park",
+        "hiking",
     ]
-    cats = [c for c in priority if c in by_cat] + [c for c in by_cat if c not in priority]
+    cats = [c for c in priority if c in by_cat] + [
+        c for c in by_cat if c not in priority
+    ]
 
     lines: List[str] = []
     for cat in cats:
-        lines.append(f"\n  [{cat.upper().replace('_',' ')}]")
+        lines.append(f"\n  [{cat.upper().replace('_', ' ')}]")
         for p in sorted(by_cat[cat], key=lambda p: (not p.ahead, p.dist_km or 9999)):
             parts = [f"    • {p.name} [id:{p.id} lat:{p.lat:.5f} lng:{p.lng:.5f}]"]
             if p.locality:
@@ -236,7 +265,9 @@ def _format_places(places: List[WirePlace]) -> str:
                 if p.pets_allowed:
                     parts.append("pets:ok" if p.pets_allowed is True else "pets:lead")
                 if p.fires_allowed:
-                    parts.append("fires:yes" if p.fires_allowed is True else "fires:seasonal")
+                    parts.append(
+                        "fires:yes" if p.fires_allowed is True else "fires:seasonal"
+                    )
                 if p.max_stay_days:
                     parts.append(f"max:{p.max_stay_days}d")
             lines.append(" | ".join(parts))
@@ -248,7 +279,7 @@ def _format_stops(stops: List[Dict[str, Any]], visited: set, current_idx: int) -
     for i, s in enumerate(stops):
         sid = s.get("id", f"p{i}")
         marker = "✅" if sid in visited else ("📍" if i == current_idx else "⬜")
-        line = f"  {marker} [{i}] {s.get('name','?')} ({s.get('type','poi')}) - {s.get('lat',0):.4f},{s.get('lng',0):.4f}"
+        line = f"  {marker} [{i}] {s.get('name', '?')} ({s.get('type', 'poi')}) - {s.get('lat', 0):.4f},{s.get('lng', 0):.4f}"
         if s.get("arrive_at"):
             line += f" | arrive: {s['arrive_at']}"
         if s.get("depart_at"):
@@ -267,11 +298,15 @@ def _format_stops(stops: List[Dict[str, Any]], visited: set, current_idx: int) -
 
 _towns_cache: Dict[str, Tuple[float, float]] | None = None
 
+
 def _get_towns() -> Dict[str, Tuple[float, float]]:
     global _towns_cache
     if _towns_cache is None:
         from pathlib import Path
-        data_file = Path(__file__).resolve().parent.parent / "data" / "guide" / "towns.json"
+
+        data_file = (
+            Path(__file__).resolve().parent.parent / "data" / "guide" / "towns.json"
+        )
         if data_file.exists():
             raw = json.loads(data_file.read_text(encoding="utf-8"))
             _towns_cache = {k: (v[0], v[1]) for k, v in raw.items()}
@@ -280,10 +315,14 @@ def _get_towns() -> Dict[str, Tuple[float, float]]:
     return _towns_cache
 
 
-def _location_hint(thread: List[GuideMsg], user_lat: float | None, user_lng: float | None) -> str:
+def _location_hint(
+    thread: List[GuideMsg], user_lat: float | None, user_lng: float | None
+) -> str:
     if not thread:
         return ""
-    last_user = next((m.content.lower() for m in reversed(thread) if m.role == "user"), "")
+    last_user = next(
+        (m.content.lower() for m in reversed(thread) if m.role == "user"), ""
+    )
     if not last_user:
         return ""
 
@@ -291,7 +330,9 @@ def _location_hint(thread: List[GuideMsg], user_lat: float | None, user_lng: flo
     for town, (tlat, tlng) in sorted(towns.items(), key=lambda x: -len(x[0])):
         if town in last_user:
             if user_lat is not None and user_lng is not None:
-                dist_km = math.sqrt((user_lat - tlat)**2 + (user_lng - tlng)**2) * 111.0
+                dist_km = (
+                    math.sqrt((user_lat - tlat) ** 2 + (user_lng - tlng) ** 2) * 111.0
+                )
                 if dist_km < 30:
                     return ""
             return (
@@ -306,6 +347,7 @@ def _location_hint(thread: List[GuideMsg], user_lat: float | None, user_lng: flo
 # SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════
 
+
 def _build_system_prompt(
     ctx: GuideContext,
     relevant_places: List[WirePlace],
@@ -319,20 +361,28 @@ def _build_system_prompt(
 
     # Position block
     if progress:
-        stop_name = ctx.stops[progress.current_stop_idx].get("name", "?") if 0 <= progress.current_stop_idx < len(ctx.stops) else "?"
+        stop_name = (
+            ctx.stops[progress.current_stop_idx].get("name", "?")
+            if 0 <= progress.current_stop_idx < len(ctx.stops)
+            else "?"
+        )
         pos = (
             f"({progress.user_lat:.5f}, {progress.user_lng:.5f}) ±{progress.user_accuracy_m:.0f}m"
-            f"{', heading '+str(int(progress.user_heading))+'°' if progress.user_heading is not None else ''}"
+            f"{', heading ' + str(int(progress.user_heading)) + '°' if progress.user_heading is not None else ''}"
             f", {_format_speed(progress.user_speed_mps)}\n"
-            f"  Near stop [{progress.current_stop_idx}]: \"{stop_name}\"\n"
+            f'  Near stop [{progress.current_stop_idx}]: "{stop_name}"\n'
             f"  Progress: {progress.km_from_start:.0f}km done, {progress.km_remaining:.0f}km to next stop"
         )
         if total_km:
-            pos += f" ({min(100,int(progress.km_from_start/total_km*100))}% of trip)"
+            pos += (
+                f" ({min(100, int(progress.km_from_start / total_km * 100))}% of trip)"
+            )
         time_str = ""
         if progress.local_time_iso:
             try:
-                dt = datetime.fromisoformat(progress.local_time_iso.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(
+                    progress.local_time_iso.replace("Z", "+00:00")
+                )
                 time_str = f"\nLocal time: {dt.strftime('%A %d %b %Y, %H:%M')} ({progress.timezone or 'local'})"
             except Exception:
                 pass
@@ -352,7 +402,9 @@ def _build_system_prompt(
         if ds.get("fatigue_level") and ds["fatigue_level"] != "none":
             ds_parts.append(f"Fatigue: {ds['fatigue_level']}")
             if ds.get("hours_since_rest") is not None:
-                ds_parts.append(f"Driving: {ds['hours_since_rest']:.1f}h since last rest")
+                ds_parts.append(
+                    f"Driving: {ds['hours_since_rest']:.1f}h since last rest"
+                )
         if ds.get("fuel_pressure") is not None:
             fp = ds["fuel_pressure"]
             label = "low" if fp > 0.7 else ("mid" if fp > 0.4 else "good")
@@ -364,16 +416,22 @@ def _build_system_prompt(
         if ds.get("temperature_c") is not None:
             ds_parts.append(f"Outside temp: {ds['temperature_c']:.0f}°C")
         if ds.get("speed_ratio") is not None and ds["speed_ratio"] < 0.8:
-            ds_parts.append(f"Running slower than planned ({ds['speed_ratio']:.0%} of expected speed)")
+            ds_parts.append(
+                f"Running slower than planned ({ds['speed_ratio']:.0%} of expected speed)"
+            )
         if ds_parts:
             driver_block = "\n## Driver State\n" + "\n".join(ds_parts)
 
     # Tool availability
     tool_notes: List[str] = []
     if ctx.corridor_key:
-        tool_notes.append(f"✅ corridor_key: {ctx.corridor_key} - places_corridor available")
+        tool_notes.append(
+            f"✅ corridor_key: {ctx.corridor_key} - places_corridor available"
+        )
     else:
-        tool_notes.append("⚠️ No corridor_key - use places_search instead of places_corridor")
+        tool_notes.append(
+            "⚠️ No corridor_key - use places_search instead of places_corridor"
+        )
     if ctx.geometry:
         tool_notes.append("✅ geometry available - places_suggest works")
     else:
@@ -387,7 +445,11 @@ def _build_system_prompt(
             "\n    Use it aggressively - multiple searches per turn is fine. Better to search and know than to guess."
         )
 
-    location_hint = _location_hint(thread or [], progress.user_lat if progress else None, progress.user_lng if progress else None)
+    location_hint = _location_hint(
+        thread or [],
+        progress.user_lat if progress else None,
+        progress.user_lng if progress else None,
+    )
     route_score_block = _format_route_score(ctx.route_score_summary)
     flood_block = _format_flood_summary(ctx.flood_summary)
     coverage_block = _format_coverage_summary(ctx.coverage_summary)
@@ -407,7 +469,7 @@ Style: warm but not repetitive. Don't start every message with "G'day" - vary yo
 When you have a Route Intelligence Score, reference its specific warnings naturally in your advice - don't just list them, weave them into your response (e.g. "I see there's no fuel for 287km past Coober Pedy - you'll want a full tank before you leave town.").
 
 ═══ TRIP ═══
-{ctx.label or 'Unnamed'} | {ctx.profile or 'drive'}{' | '+str(int(total_km))+'km' if total_km else ''}{' | ~'+str(int((ctx.total_duration_s or 0)/3600))+'h drive' if ctx.total_duration_s else ''}
+{ctx.label or "Unnamed"} | {ctx.profile or "drive"}{" | " + str(int(total_km)) + "km" if total_km else ""}{" | ~" + str(int((ctx.total_duration_s or 0) / 3600)) + "h drive" if ctx.total_duration_s else ""}
 Phase: {phase}
 Stops (arrive/depart times are the traveller's planned schedule):
 {_format_stops(ctx.stops, visited, current_idx)}
@@ -422,12 +484,12 @@ Stops (arrive/depart times are the traveller's planned schedule):
 
 ═══ TOOLS ═══
 To find places and produce action buttons, use these (they return structured place data with id/lat/lng):
-{chr(10).join('  '+t for t in tool_notes)}
+{chr(10).join("  " + t for t in tool_notes)}
   places_search   {{"tool":"places_search","req":{{"center":{{"lat":-26.8,"lng":153.0}},"radius_m":15000,"categories":["cafe","bakery"],"limit":20}}}}
   places_corridor {{"tool":"places_corridor","req":{{"corridor_key":"auto","categories":["viewpoint","waterfall","swimming_hole"],"limit":30}}}}
   places_suggest  {{"tool":"places_suggest","req":{{"geometry":"auto","interval_km":50,"categories":["attraction"]}}}}
 
-For current info (road conditions, events, hours, reviews):{web_search_block if web_search_block else chr(10)+"  web_search (unavailable - no API key configured)"}
+For current info (road conditions, events, hours, reviews):{web_search_block if web_search_block else chr(10) + "  web_search (unavailable - no API key configured)"}
 
 IMPORTANT: To recommend places with action buttons, you MUST use places_search/places_corridor/places_suggest. Web search does NOT produce buttons. Use places tools first for finding stops, web_search for current conditions.
 
@@ -440,7 +502,7 @@ Actions - for each place from tool results or nearby data, include buttons using
   {{"type":"web","label":"Website","place_id":"id","place_name":"Name","url":"https://..."}}
   {{"type":"call","label":"Call","place_id":"id","place_name":"Name","tel":"0400..."}}
 
-You can reply AND search simultaneously - set done=false with tool_calls to keep exploring while the user sees your message. After tools return you'll get another turn to share findings with action buttons.{(' '+location_hint) if location_hint else ''}"""
+You can reply AND search simultaneously - set done=false with tool_calls to keep exploring while the user sees your message. After tools return you'll get another turn to share findings with action buttons.{(" " + location_hint) if location_hint else ""}"""
 
     return prompt
 
@@ -476,7 +538,11 @@ def _summarize_tool_result(tr: GuideToolResult) -> Dict[str, Any]:
             extra = p.get("extra", {})
             if isinstance(extra, dict):
                 tags = extra.get("tags", extra)
-                suburb = tags.get("addr:suburb") or tags.get("addr:city") or tags.get("addr:town")
+                suburb = (
+                    tags.get("addr:suburb")
+                    or tags.get("addr:city")
+                    or tags.get("addr:town")
+                )
                 if suburb:
                     entry["suburb"] = str(suburb)[:40]
                 if tags.get("opening_hours"):
@@ -487,14 +553,22 @@ def _summarize_tool_result(tr: GuideToolResult) -> Dict[str, Any]:
                 website = tags.get("website") or tags.get("contact:website")
                 if website:
                     entry["website"] = str(website)[:100]
-                fuel_types = [k.replace("fuel:", "") for k in tags if k.startswith("fuel:") and tags[k] == "yes"]
+                fuel_types = [
+                    k.replace("fuel:", "")
+                    for k in tags
+                    if k.startswith("fuel:") and tags[k] == "yes"
+                ]
                 if fuel_types:
                     entry["fuel_types"] = fuel_types[:5]
                 if tags.get("socket:type2") or tags.get("socket:chademo"):
                     entry["ev_charging"] = True
                 fee = tags.get("fee")
                 if fee:
-                    entry["fee"] = "free" if fee == "no" else ("paid" if fee == "yes" else str(fee)[:20])
+                    entry["fee"] = (
+                        "free"
+                        if fee == "no"
+                        else ("paid" if fee == "yes" else str(fee)[:20])
+                    )
                 if tags.get("drinking_water"):
                     entry["water"] = tags["drinking_water"] == "yes"
                 cuisine = tags.get("cuisine")
@@ -535,10 +609,14 @@ def _build_user_message(req: GuideTurnRequest) -> str:
         parts.append(f"{role}: {m.content}")
 
     for tr in req.tool_results[-_MAX_TOOL_RESULTS:]:
-        parts.append(f"\n[TOOL RESULT: {tr.tool}]\n{json.dumps(_summarize_tool_result(tr), separators=(',',':'))}")
+        parts.append(
+            f"\n[TOOL RESULT: {tr.tool}]\n{json.dumps(_summarize_tool_result(tr), separators=(',', ':'))}"
+        )
 
     if req.preferred_categories:
-        parts.append(f"\n[Category filter active: {', '.join(req.preferred_categories)}]")
+        parts.append(
+            f"\n[Category filter active: {', '.join(req.preferred_categories)}]"
+        )
 
     return "\n".join(parts)
 
@@ -546,6 +624,7 @@ def _build_user_message(req: GuideTurnRequest) -> str:
 # ══════════════════════════════════════════════════════════════
 # OUTPUT NORMALIZATION
 # ══════════════════════════════════════════════════════════════
+
 
 def _normalize_model_output(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
@@ -567,6 +646,7 @@ def _normalize_model_output(raw: Any) -> Dict[str, Any]:
 # ══════════════════════════════════════════════════════════════
 # TOOL REQUEST REPAIR & VALIDATION
 # ══════════════════════════════════════════════════════════════
+
 
 def _repair_req(tool: str, req: Dict[str, Any], ctx: GuideContext) -> Dict[str, Any]:
     req = dict(req)
@@ -610,18 +690,57 @@ def _validate_tool_req(tool: str, req: Dict[str, Any]) -> Tuple[bool, str]:
 # WEB SEARCH RESULT FORMATTER
 # ══════════════════════════════════════════════════════════════
 
+
 def _format_search_results(results: List[Dict[str, str]]) -> str:
     if not results:
         return "(No results found.)"
     lines = []
     for i, r in enumerate(results, 1):
-        lines.append(f"[{i}] {r.get('title','')}\n{r.get('content','')[:500]}\nSource: {r.get('url','')}")
+        lines.append(
+            f"[{i}] {r.get('title', '')}\n{r.get('content', '')[:500]}\nSource: {r.get('url', '')}"
+        )
     return "\n\n".join(lines)
+
+
+def _extract_first_json_object(s: str) -> str | None:
+    """Return the substring containing the first balanced {...} JSON object,
+    or None if no balanced object is present. Respects double-quoted strings
+    and backslash escapes so braces inside string values don't break the
+    depth counter. Used by the guide LLM parser to recover when the model
+    wraps its JSON in trailing prose."""
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
 # SERVICE
 # ══════════════════════════════════════════════════════════════
+
 
 class GuideService:
     def __init__(self) -> None:
@@ -651,13 +770,21 @@ class GuideService:
             "max_tokens": 4000,
         }
         url = f"{self._base}/chat/completions"
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
 
         # Log payload size for debugging context window issues
         sys_chars = len(body["messages"][0]["content"])  # type: ignore[index]
         usr_chars = len(body["messages"][1]["content"])  # type: ignore[index]
         est_tokens = (sys_chars + usr_chars) // 3  # rough char-to-token estimate
-        logger.info("Guide LLM call: sys=%d chars, user=%d chars, ~%d tokens input", sys_chars, usr_chars, est_tokens)
+        logger.info(
+            "Guide LLM call: sys=%d chars, user=%d chars, ~%d tokens input",
+            sys_chars,
+            usr_chars,
+            est_tokens,
+        )
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(url, headers=headers, json=body)
@@ -668,25 +795,58 @@ class GuideService:
         # Log token usage from API response
         usage = data.get("usage", {})
         if usage:
-            logger.info("Guide LLM usage: prompt=%s completion=%s total=%s",
-                        usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"), usage.get("total_tokens", "?"))
+            logger.info(
+                "Guide LLM usage: prompt=%s completion=%s total=%s",
+                usage.get("prompt_tokens", "?"),
+                usage.get("completion_tokens", "?"),
+                usage.get("total_tokens", "?"),
+            )
 
         try:
             out_text: str = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
-            raise RuntimeError(f"Guide LLM: unexpected response: {e}. Raw: {json.dumps(data)[:500]}")
+            raise RuntimeError(
+                f"Guide LLM: unexpected response: {e}. Raw: {json.dumps(data)[:500]}"
+            )
 
         if not out_text:
             raise RuntimeError("Guide LLM: empty response")
 
         try:
             return json.loads(out_text)
-        except Exception as e:
-            stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", out_text.strip())
+        except Exception:
+            pass
+        # Strip ``` / ```json code fences and retry
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", out_text.strip())
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+        # LLM sometimes returns valid JSON followed by trailing prose, or
+        # wraps the JSON in unexpected leading text. Extract the first
+        # balanced {...} block via brace-matching that respects quoted
+        # strings + escapes (Tate 2026-05-28: "stop now" pill triggered
+        # invalid JSON at char 355).
+        extracted = _extract_first_json_object(stripped)
+        if extracted is not None:
             try:
-                return json.loads(stripped)
+                return json.loads(extracted)
             except Exception:
-                raise RuntimeError(f"Guide LLM: invalid JSON: {e}. text={out_text[:400]}")
+                pass
+        # Last resort: degrade gracefully rather than crash the chat. The
+        # user sees the LLM's raw reply as the assistant message instead of
+        # a red "Guide error" banner. Actions/tool_calls are empty so the
+        # turn is non-destructive (no places added, no web search fired).
+        logger.warning(
+            "Guide LLM: unparseable JSON, falling back to plain-text reply. text=%r",
+            out_text[:400],
+        )
+        return {
+            "assistant": out_text.strip(),
+            "actions": [],
+            "tool_calls": [],
+            "done": True,
+        }
 
     async def turn(self, req: GuideTurnRequest) -> GuideTurnResponse:
         if not self._api_key:
@@ -699,17 +859,38 @@ class GuideService:
         raw = await self._call_llm(sys_prompt, user_msg)
         norm = _normalize_model_output(raw)
         raw_tcs = norm.get("tool_calls", [])
-        tc_summary = [{"tool": tc.get("tool"), "req_keys": list(tc.get("req", {}).keys()) if isinstance(tc.get("req"), dict) else str(tc.get("req"))[:50]} for tc in raw_tcs if isinstance(tc, dict)]
-        logger.info("Guide step 0: text=%d chars, actions=%d, tool_calls=%d (%s), done=%s",
-                    len(norm.get("assistant", "")),
-                    len(norm.get("actions", [])), len(raw_tcs), tc_summary,
-                    norm.get("done"))
+        tc_summary = [
+            {
+                "tool": tc.get("tool"),
+                "req_keys": list(tc.get("req", {}).keys())
+                if isinstance(tc.get("req"), dict)
+                else str(tc.get("req"))[:50],
+            }
+            for tc in raw_tcs
+            if isinstance(tc, dict)
+        ]
+        logger.info(
+            "Guide step 0: text=%d chars, actions=%d, tool_calls=%d (%s), done=%s",
+            len(norm.get("assistant", "")),
+            len(norm.get("actions", [])),
+            len(raw_tcs),
+            tc_summary,
+            norm.get("done"),
+        )
 
         # Step 2: Handle web searches (max 1 internal round-trip)
         tool_calls = norm.get("tool_calls") or []
         if tool_calls:
-            web_searches = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("tool") == "web_search"]
-            non_web = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("tool") != "web_search"]
+            web_searches = [
+                tc
+                for tc in tool_calls
+                if isinstance(tc, dict) and tc.get("tool") == "web_search"
+            ]
+            non_web = [
+                tc
+                for tc in tool_calls
+                if isinstance(tc, dict) and tc.get("tool") != "web_search"
+            ]
 
             # Execute web searches (max 2) inline
             if web_searches:
@@ -727,14 +908,30 @@ class GuideService:
                     raw2 = await self._call_llm(sys_prompt, user_msg)
                     norm = _normalize_model_output(raw2)
                     raw_tcs2 = norm.get("tool_calls", [])
-                    tc_summary2 = [{"tool": tc.get("tool"), "req_keys": list(tc.get("req", {}).keys()) if isinstance(tc.get("req"), dict) else str(tc.get("req"))[:50]} for tc in raw_tcs2 if isinstance(tc, dict)]
-                    logger.info("Guide step 1 (post-websearch): text=%d chars, actions=%d, tool_calls=%d (%s), done=%s",
-                                len(norm.get("assistant", "")),
-                                len(norm.get("actions", [])), len(raw_tcs2), tc_summary2,
-                                norm.get("done"))
+                    tc_summary2 = [
+                        {
+                            "tool": tc.get("tool"),
+                            "req_keys": list(tc.get("req", {}).keys())
+                            if isinstance(tc.get("req"), dict)
+                            else str(tc.get("req"))[:50],
+                        }
+                        for tc in raw_tcs2
+                        if isinstance(tc, dict)
+                    ]
+                    logger.info(
+                        "Guide step 1 (post-websearch): text=%d chars, actions=%d, tool_calls=%d (%s), done=%s",
+                        len(norm.get("assistant", "")),
+                        len(norm.get("actions", [])),
+                        len(raw_tcs2),
+                        tc_summary2,
+                        norm.get("done"),
+                    )
                     # Strip any further web_search calls - we only do one round
-                    norm["tool_calls"] = [tc for tc in (norm.get("tool_calls") or [])
-                                          if isinstance(tc, dict) and tc.get("tool") != "web_search"]
+                    norm["tool_calls"] = [
+                        tc
+                        for tc in (norm.get("tool_calls") or [])
+                        if isinstance(tc, dict) and tc.get("tool") != "web_search"
+                    ]
 
         tool_calls = norm.get("tool_calls") or []
         validated_calls: List[Dict[str, Any]] = []
@@ -747,35 +944,55 @@ class GuideService:
             req_obj = tc.get("req") if isinstance(tc.get("req"), dict) else {}
             tc_id = tc.get("id") or f"tc_{uuid.uuid4().hex[:8]}"
 
-            logger.info("Guide: raw tool_call: tool=%s req_keys=%s", tool, list(req_obj.keys()) if isinstance(req_obj, dict) else "N/A")
+            logger.info(
+                "Guide: raw tool_call: tool=%s req_keys=%s",
+                tool,
+                list(req_obj.keys()) if isinstance(req_obj, dict) else "N/A",
+            )
 
             if tool not in ("places_search", "places_corridor", "places_suggest"):
-                logger.warning("Guide: dropping unknown tool: %s (raw tc: %s)", tool, json.dumps(tc)[:300])
+                logger.warning(
+                    "Guide: dropping unknown tool: %s (raw tc: %s)",
+                    tool,
+                    json.dumps(tc)[:300],
+                )
             else:
                 fixed_req = _repair_req(tool, req_obj, req.context)  # type: ignore[arg-type]
                 ok, err = _validate_tool_req(tool, fixed_req)
                 if ok:
-                    validated_calls.append({"id": tc_id, "tool": tool, "req": fixed_req})
+                    validated_calls.append(
+                        {"id": tc_id, "tool": tool, "req": fixed_req}
+                    )
                 else:
-                    logger.warning("Guide: tool %s failed validation: %s (req: %s)", tool, err, json.dumps(fixed_req)[:300])
+                    logger.warning(
+                        "Guide: tool %s failed validation: %s (req: %s)",
+                        tool,
+                        err,
+                        json.dumps(fixed_req)[:300],
+                    )
 
-        response_calls = [GuideToolCall(id=vc["id"], tool=vc["tool"], req=vc["req"]) for vc in validated_calls]
+        response_calls = [
+            GuideToolCall(id=vc["id"], tool=vc["tool"], req=vc["req"])
+            for vc in validated_calls
+        ]
 
         response_actions: List[GuideAction] = []
         for a in norm.get("actions", []):
             try:
-                response_actions.append(GuideAction(
-                    type=a.get("type", "web"),
-                    label=a.get("label", ""),
-                    place_id=a.get("place_id"),
-                    place_name=a.get("place_name"),
-                    url=a.get("url"),
-                    tel=a.get("tel"),
-                    lat=a.get("lat"),
-                    lng=a.get("lng"),
-                    category=a.get("category"),
-                    description=a.get("description"),
-                ))
+                response_actions.append(
+                    GuideAction(
+                        type=a.get("type", "web"),
+                        label=a.get("label", ""),
+                        place_id=a.get("place_id"),
+                        place_name=a.get("place_name"),
+                        url=a.get("url"),
+                        tel=a.get("tel"),
+                        lat=a.get("lat"),
+                        lng=a.get("lng"),
+                        category=a.get("category"),
+                        description=a.get("description"),
+                    )
+                )
             except Exception:
                 continue
 
@@ -785,6 +1002,11 @@ class GuideService:
             actions=response_actions,
             done=norm.get("done", not bool(response_calls)),
         )
-        logger.info("Guide response: text=%d chars, actions=%d, tool_calls=%d, done=%s",
-                     len(resp.assistant), len(resp.actions), len(resp.tool_calls), resp.done)
+        logger.info(
+            "Guide response: text=%d chars, actions=%d, tool_calls=%d, done=%s",
+            len(resp.assistant),
+            len(resp.actions),
+            len(resp.tool_calls),
+            resp.done,
+        )
         return resp
