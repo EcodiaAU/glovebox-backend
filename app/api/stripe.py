@@ -12,14 +12,28 @@ from typing import Optional
 import stripe as stripe_lib
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from app.core.auth import AuthUser, get_optional_user
+from app.core.error_models import (
+    CheckoutSessionResponse,
+    ErrorResponse,
+    ReceivedResponse,
+    UnlockedResponse,
+)
 from app.core.settings import settings
 from app.core.supabase_admin import get_supabase_admin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/stripe", tags=["stripe"])
+
+
+# ── Models ───────────────────────────────────────────────────────
+
+
+class ConfirmRequest(BaseModel):
+    session_id: str = Field(description="Stripe Checkout Session id, format `cs_...`")
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -29,6 +43,17 @@ def _get_stripe() -> stripe_lib.StripeClient:
     if not settings.stripe_secret_key:
         raise RuntimeError("STRIPE_SECRET_KEY not configured")
     return stripe_lib.StripeClient(settings.stripe_secret_key)
+
+
+def _error(message: str, status_code: int) -> JSONResponse:
+    """Render the legacy `{"error": "..."}` shape with the matching HTTP code.
+
+    Kept as a small helper so every route emits the same payload and OpenAPI
+    references the same `ErrorResponse` model in its `responses=` block.
+    """
+    return JSONResponse(
+        ErrorResponse(error=message).model_dump(), status_code=status_code
+    )
 
 
 async def _upsert_entitlement(
@@ -54,34 +79,59 @@ async def _upsert_entitlement(
     if rc_app_user_id:
         row["rc_app_user_id"] = rc_app_user_id
 
-    logger.info("[stripe] Upserting entitlement for user %s source=%s row=%s", user_id, source, row)
+    logger.info(
+        "[stripe] Upserting entitlement for user %s source=%s row=%s",
+        user_id,
+        source,
+        row,
+    )
     try:
-        result = supa.table("user_entitlements").upsert(
-            row, on_conflict="user_id,source"
-        ).execute()
+        result = (
+            supa.table("user_entitlements")
+            .upsert(row, on_conflict="user_id,source")
+            .execute()
+        )
         if hasattr(result, "error") and result.error:
-            logger.error("[stripe] Supabase upsert error for user %s: %s", user_id, result.error)
+            logger.error(
+                "[stripe] Supabase upsert error for user %s: %s", user_id, result.error
+            )
         else:
-            logger.info("[stripe] Entitlement upserted successfully for user %s, data=%s", user_id, getattr(result, "data", None))
+            logger.info(
+                "[stripe] Entitlement upserted successfully for user %s, data=%s",
+                user_id,
+                getattr(result, "data", None),
+            )
     except Exception as exc:
-        logger.error("[stripe] Supabase upsert EXCEPTION for user %s: %s", user_id, exc, exc_info=True)
+        logger.error(
+            "[stripe] Supabase upsert EXCEPTION for user %s: %s",
+            user_id,
+            exc,
+            exc_info=True,
+        )
         raise
 
 
 # ── POST /stripe/checkout ────────────────────────────────────────
 
 
-@router.post("/checkout")
+@router.post(
+    "/checkout",
+    response_model=CheckoutSessionResponse,
+    responses={
+        401: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+)
 async def create_checkout_session(
     request: Request,
     user: Optional[AuthUser] = Depends(get_optional_user),
-):
+) -> CheckoutSessionResponse | JSONResponse:
     if not user:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return _error("Unauthorized", 401)
 
     price_id = settings.stripe_price_id
     if not price_id:
-        return JSONResponse({"error": "Payment not configured."}, status_code=500)
+        return _error("Payment not configured.", 500)
 
     origin = request.headers.get("origin", "https://roam.ecodia.au")
 
@@ -98,7 +148,7 @@ async def create_checkout_session(
         }
     )
 
-    return {"url": session.url}
+    return CheckoutSessionResponse(url=session.url)
 
 
 # ── POST /stripe/confirm ─────────────────────────────────────────
@@ -106,31 +156,45 @@ async def create_checkout_session(
 # Verifies the checkout session directly with Stripe and grants the entitlement.
 
 
-@router.post("/confirm")
+@router.post(
+    "/confirm",
+    response_model=UnlockedResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+    },
+)
 async def confirm_checkout_session(
-    request: Request,
+    body: ConfirmRequest,
     user: Optional[AuthUser] = Depends(get_optional_user),
-):
+) -> UnlockedResponse | JSONResponse:
     logger.info("[stripe/confirm] Called. user=%s", user.id if user else None)
     if not user:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return _error("Unauthorized", 401)
 
-    body = await request.json()
-    session_id: str = (body or {}).get("session_id", "")
+    session_id = body.session_id
     if not session_id or not session_id.startswith("cs_"):
         logger.warning("[stripe/confirm] Invalid session_id: %r", session_id)
-        return JSONResponse({"error": "Invalid session_id"}, status_code=400)
+        return _error("Invalid session_id", 400)
 
     client = _get_stripe()
     try:
         session = client.checkout.sessions.retrieve(session_id)
     except Exception as exc:
-        logger.error("[stripe/confirm] Failed to retrieve session %s: %s", session_id, exc)
-        return JSONResponse({"error": "Could not verify session"}, status_code=502)
+        logger.error(
+            "[stripe/confirm] Failed to retrieve session %s: %s", session_id, exc
+        )
+        return _error("Could not verify session", 502)
 
     logger.info(
         "[stripe/confirm] Session %s: payment_status=%s, metadata=%s, customer=%s",
-        session_id, session.payment_status, session.metadata, session.customer,
+        session_id,
+        session.payment_status,
+        session.metadata,
+        session.customer,
     )
 
     # Verify the session belongs to this user
@@ -138,13 +202,18 @@ async def confirm_checkout_session(
     if session_user_id != user.id:
         logger.warning(
             "[stripe/confirm] User %s tried to confirm session owned by %s",
-            user.id, session_user_id,
+            user.id,
+            session_user_id,
         )
-        return JSONResponse({"error": "Session does not belong to this user"}, status_code=403)
+        return _error("Session does not belong to this user", 403)
 
     if session.payment_status != "paid":
-        logger.info("[stripe/confirm] Session %s not paid yet: %s", session_id, session.payment_status)
-        return JSONResponse({"unlocked": False, "payment_status": session.payment_status})
+        logger.info(
+            "[stripe/confirm] Session %s not paid yet: %s",
+            session_id,
+            session.payment_status,
+        )
+        return UnlockedResponse(unlocked=False, payment_status=session.payment_status)
 
     customer = session.customer
     payment_intent = session.payment_intent
@@ -153,23 +222,46 @@ async def confirm_checkout_session(
             user.id,
             "stripe",
             stripe_customer_id=customer if isinstance(customer, str) else None,
-            stripe_payment_intent=payment_intent if isinstance(payment_intent, str) else None,
+            stripe_payment_intent=payment_intent
+            if isinstance(payment_intent, str)
+            else None,
         )
     except Exception as exc:
-        logger.error("[stripe/confirm] Entitlement upsert failed for user %s: %s", user.id, exc, exc_info=True)
-        return JSONResponse({"error": "Failed to grant entitlement"}, status_code=500)
+        logger.error(
+            "[stripe/confirm] Entitlement upsert failed for user %s: %s",
+            user.id,
+            exc,
+            exc_info=True,
+        )
+        return _error("Failed to grant entitlement", 500)
 
-    logger.info("[stripe/confirm] Entitlement granted for user %s via session %s", user.id, session_id)
-    return {"unlocked": True}
+    logger.info(
+        "[stripe/confirm] Entitlement granted for user %s via session %s",
+        user.id,
+        session_id,
+    )
+    return UnlockedResponse(unlocked=True)
 
 
 # ── POST /stripe/webhook ─────────────────────────────────────────
 
 
-@router.post("/webhook")
-async def stripe_webhook(request: Request):
+@router.post(
+    "/webhook",
+    response_model=ReceivedResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        401: {"model": ErrorResponse},
+    },
+)
+async def stripe_webhook(request: Request) -> JSONResponse:
     """Handles both Stripe and RevenueCat webhooks.
-    Stripe sends a stripe-signature header; RevenueCat does not."""
+
+    Stripe sends a stripe-signature header; RevenueCat does not.
+
+    Webhook bodies are vendor-defined and not modelled at the route signature
+    layer; signature verification needs the raw request body, so Request stays.
+    """
 
     is_stripe = "stripe-signature" in request.headers
     if is_stripe:
@@ -183,7 +275,7 @@ async def _handle_stripe_webhook(request: Request) -> JSONResponse:
     webhook_secret = settings.stripe_webhook_secret
 
     if not sig or not webhook_secret:
-        return JSONResponse({"error": "Missing signature"}, status_code=400)
+        return _error("Missing signature", 400)
 
     try:
         event = stripe_lib.Webhook.construct_event(
@@ -191,14 +283,17 @@ async def _handle_stripe_webhook(request: Request) -> JSONResponse:
         )
     except stripe_lib.SignatureVerificationError as exc:
         logger.error("[stripe/webhook] Signature verification failed: %s", exc)
-        return JSONResponse({"error": "Invalid signature"}, status_code=400)
+        return _error("Invalid signature", 400)
 
     if event.type == "checkout.session.completed":
         session = event.data.object
         user_id = (session.get("metadata") or {}).get("supabase_user_id")
         if not user_id:
-            logger.error("[stripe/webhook] No supabase_user_id in session metadata: %s", session.get("id"))
-            return JSONResponse({"error": "No user ID in metadata"}, status_code=400)
+            logger.error(
+                "[stripe/webhook] No supabase_user_id in session metadata: %s",
+                session.get("id"),
+            )
+            return _error("No user ID in metadata", 400)
 
         customer = session.get("customer")
         payment_intent = session.get("payment_intent")
@@ -206,40 +301,49 @@ async def _handle_stripe_webhook(request: Request) -> JSONResponse:
             user_id,
             "stripe",
             stripe_customer_id=customer if isinstance(customer, str) else None,
-            stripe_payment_intent=payment_intent if isinstance(payment_intent, str) else None,
+            stripe_payment_intent=payment_intent
+            if isinstance(payment_intent, str)
+            else None,
         )
         logger.info("[stripe/webhook] Unlocked user %s via Stripe", user_id)
 
-    return JSONResponse({"received": True})
+    return JSONResponse(ReceivedResponse(received=True).model_dump())
 
 
 async def _handle_revenuecat_webhook(request: Request) -> JSONResponse:
     secret = settings.revenuecat_webhook_secret
     if secret:
-        auth = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+        auth = (
+            (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+        )
         if auth != secret:
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return _error("Unauthorized", 401)
 
     body = await request.json()
     event_type: str = (body.get("event") or {}).get("type", "")
 
     if event_type not in ("INITIAL_PURCHASE", "NON_RENEWING_PURCHASE"):
-        return JSONResponse({"received": True})
+        return JSONResponse(ReceivedResponse(received=True).model_dump())
 
     rc_user_id: str = (body.get("event") or {}).get("app_user_id", "")
     if not rc_user_id:
-        return JSONResponse({"error": "No app_user_id"}, status_code=400)
+        return _error("No app_user_id", 400)
 
     import re
-    uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+    uuid_pattern = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+    )
     if not uuid_pattern.match(rc_user_id):
-        logger.warning("[rc/webhook] app_user_id is not a UUID - skipping: %s", rc_user_id)
-        return JSONResponse({"received": True})
+        logger.warning(
+            "[rc/webhook] app_user_id is not a UUID - skipping: %s", rc_user_id
+        )
+        return JSONResponse(ReceivedResponse(received=True).model_dump())
 
     await _upsert_entitlement(rc_user_id, "revenuecat", rc_app_user_id=rc_user_id)
     logger.info("[rc/webhook] Unlocked user %s via RevenueCat", rc_user_id)
 
-    return JSONResponse({"received": True})
+    return JSONResponse(ReceivedResponse(received=True).model_dump())
 
 
 # ── POST /stripe/grant-manual (dev only) ──────────────────────────
@@ -247,17 +351,24 @@ async def _handle_revenuecat_webhook(request: Request) -> JSONResponse:
 # Only available when STRIPE_SECRET_KEY starts with "sk_test_".
 
 
-@router.post("/grant-manual")
+@router.post(
+    "/grant-manual",
+    response_model=UnlockedResponse,
+    responses={
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+    },
+)
 async def grant_manual_entitlement(
     user: Optional[AuthUser] = Depends(get_optional_user),
-):
+) -> UnlockedResponse | JSONResponse:
     if not user:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return _error("Unauthorized", 401)
 
     # Safety: only allow in test mode
     if not settings.stripe_secret_key.startswith("sk_test_"):
-        return JSONResponse({"error": "Manual grant only available in test mode"}, status_code=403)
+        return _error("Manual grant only available in test mode", 403)
 
     await _upsert_entitlement(user.id, "manual")
     logger.info("[stripe/grant-manual] Manual entitlement granted for user %s", user.id)
-    return {"unlocked": True, "source": "manual"}
+    return UnlockedResponse(unlocked=True, source="manual")

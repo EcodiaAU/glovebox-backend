@@ -10,8 +10,10 @@ import logging
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.core.auth import AuthUser, get_current_user
+from app.core.error_models import ErrorResponse
 from app.core.supabase_admin import get_supabase_admin
 
 logger = logging.getLogger(__name__)
@@ -19,8 +21,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/account", tags=["account"])
 
 
-@router.delete("")
-async def delete_account(user: AuthUser = Depends(get_current_user)):
+class AccountDeleteResponse(BaseModel):
+    deleted: bool
+
+
+@router.delete(
+    "",
+    response_model=AccountDeleteResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def delete_account(
+    user: AuthUser = Depends(get_current_user),
+) -> AccountDeleteResponse | JSONResponse:
     """
     Permanently delete the authenticated user's account and all associated data.
 
@@ -36,9 +48,13 @@ async def delete_account(user: AuthUser = Depends(get_current_user)):
     except Exception as exc:
         logger.error("[account/delete] Failed to delete user %s: %s", user.id, exc)
         return JSONResponse(
-            {"error": "Failed to delete account. Please try again or contact support."},
+            ErrorResponse(
+                error="Failed to delete account. Please try again or contact support."
+            ).model_dump(),
             status_code=500,
         )
 
-    logger.info("[account/delete] Deleted user %s (%s)", user.id, user.email or "no-email")
-    return {"deleted": True}
+    logger.info(
+        "[account/delete] Deleted user %s (%s)", user.id, user.email or "no-email"
+    )
+    return AccountDeleteResponse(deleted=True)

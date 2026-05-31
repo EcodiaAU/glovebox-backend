@@ -1,0 +1,172 @@
+name: bump-clients
+
+# Whenever a push to main changes openapi.json, a route file, or a Pydantic
+# model, regenerate the locked OpenAPI spec and open client-bump PRs against
+# the three native client repos (glovebox-ios, glovebox-android, glovebox-web).
+#
+# Each native repo carries its own generator (swift-openapi-generator,
+# openapi-generator Kotlin, openapi-typescript-codegen) and consumes the
+# uploaded `openapi.json` artifact from this run.
+#
+# Auth model: a fine-grained PAT scoped to the three repos lives at
+#   kv_store.creds.github_glovebox_backend_bot
+# and is mirrored into the repo secret `GLOVEBOX_BACKEND_BOT_TOKEN`
+# (Settings -> Secrets and variables -> Actions). If the secret is absent,
+# the job stops at artifact upload + the per-repo dispatch is skipped with a
+# TODO so the cred provisioning is visible in the run log.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docs/openapi-3.1.0-locked.json"
+      - ".github/workflows/bump-clients.yml"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force a client bump even if openapi.json hasn't changed"
+        type: boolean
+        default: false
+
+jobs:
+  regenerate-openapi:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_ANON_KEY: test-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+      STRIPE_SECRET_KEY: sk_test_dummy
+      STRIPE_PRICE_ID: price_test_dummy
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy
+      OSRM_BASE_URL: http://osrm.invalid
+      MAPBOX_TOKEN: test
+    outputs:
+      openapi_sha: ${{ steps.checksum.outputs.sha }}
+      changed: ${{ steps.changed.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Regenerate openapi.json
+        run: |
+          python -c "import json; from app.main import app; print(json.dumps(app.openapi(), indent=2, sort_keys=True))" > openapi.json
+          test "$(jq -r .openapi openapi.json)" = "3.1.0" \
+            || (echo "::error::openapi version drifted off 3.1.0" && exit 1)
+
+      - name: Detect change vs locked baseline
+        id: changed
+        run: |
+          if diff -q docs/openapi-3.1.0-locked.json openapi.json >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute openapi sha
+        id: checksum
+        run: echo "sha=$(sha256sum openapi.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload openapi.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: openapi.json
+          retention-days: 90
+
+  bump-ios:
+    needs: regenerate-openapi
+    if: needs.regenerate-openapi.outputs.changed == 'true' || inputs.force
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for client-bump-bot PAT
+        id: cred
+        run: |
+          if [ -z "${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}" ]; then
+            echo "::warning::GLOVEBOX_BACKEND_BOT_TOKEN secret missing. Provision via kv_store.creds.github_glovebox_backend_bot."
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch client-bump to glovebox-ios
+        if: steps.cred.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}
+        run: |
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/EcodiaTate/glovebox-ios/dispatches \
+            -f event_type=openapi-bump \
+            -f client_payload[openapi_sha]=${{ needs.regenerate-openapi.outputs.openapi_sha }} \
+            -f client_payload[source_repo]=${{ github.repository }} \
+            -f client_payload[source_sha]=${{ github.sha }}
+
+  bump-android:
+    needs: regenerate-openapi
+    if: needs.regenerate-openapi.outputs.changed == 'true' || inputs.force
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for client-bump-bot PAT
+        id: cred
+        run: |
+          if [ -z "${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}" ]; then
+            echo "::warning::GLOVEBOX_BACKEND_BOT_TOKEN secret missing. Provision via kv_store.creds.github_glovebox_backend_bot."
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch client-bump to glovebox-android
+        if: steps.cred.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}
+        run: |
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/EcodiaTate/glovebox-android/dispatches \
+            -f event_type=openapi-bump \
+            -f client_payload[openapi_sha]=${{ needs.regenerate-openapi.outputs.openapi_sha }} \
+            -f client_payload[source_repo]=${{ github.repository }} \
+            -f client_payload[source_sha]=${{ github.sha }}
+
+  bump-web:
+    needs: regenerate-openapi
+    if: needs.regenerate-openapi.outputs.changed == 'true' || inputs.force
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for client-bump-bot PAT
+        id: cred
+        run: |
+          if [ -z "${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}" ]; then
+            echo "::warning::GLOVEBOX_BACKEND_BOT_TOKEN secret missing. Provision via kv_store.creds.github_glovebox_backend_bot."
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch client-bump to glovebox-web
+        if: steps.cred.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GLOVEBOX_BACKEND_BOT_TOKEN }}
+        run: |
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/EcodiaTate/glovebox-web/dispatches \
+            -f event_type=openapi-bump \
+            -f client_payload[openapi_sha]=${{ needs.regenerate-openapi.outputs.openapi_sha }} \
+            -f client_payload[source_repo]=${{ github.repository }} \
+            -f client_payload[source_sha]=${{ github.sha }}

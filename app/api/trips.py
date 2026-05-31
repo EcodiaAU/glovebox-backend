@@ -10,9 +10,10 @@ import logging
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.auth import AuthUser, get_current_user
+from app.core.error_models import ErrorResponse
 from app.core.supabase_admin import get_supabase_admin
 
 logger = logging.getLogger(__name__)
@@ -21,33 +22,46 @@ router = APIRouter(prefix="/trips", tags=["trips"])
 
 
 class MergeRequest(BaseModel):
-    local_count: int = 0
+    local_count: int = Field(default=0, ge=0)
+
+
+class TripCountResponse(BaseModel):
+    trips_used: int
 
 
 # ── POST /trips/increment ────────────────────────────────────────
 
 
-@router.post("/increment")
-async def increment_trip_count(user: AuthUser = Depends(get_current_user)):
+@router.post(
+    "/increment",
+    response_model=TripCountResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def increment_trip_count(
+    user: AuthUser = Depends(get_current_user),
+) -> TripCountResponse | JSONResponse:
     supa = get_supabase_admin()
 
     result = supa.rpc("increment_trip_count", {"p_user_id": user.id}).execute()
 
     if hasattr(result, "error") and result.error:
         logger.error("[trips/increment] %s", result.error)
-        return JSONResponse({"error": "Failed to increment."}, status_code=500)
+        return JSONResponse(
+            ErrorResponse(error="Failed to increment.").model_dump(),
+            status_code=500,
+        )
 
-    return {"trips_used": result.data}
+    return TripCountResponse(trips_used=int(result.data))
 
 
 # ── POST /trips/merge ────────────────────────────────────────────
 
 
-@router.post("/merge")
+@router.post("/merge", response_model=TripCountResponse)
 async def merge_trip_count(
     body: MergeRequest,
     user: AuthUser = Depends(get_current_user),
-):
+) -> TripCountResponse:
     supa = get_supabase_admin()
 
     # Clamp to sane range
@@ -72,4 +86,4 @@ async def merge_trip_count(
             on_conflict="user_id",
         ).execute()
 
-    return {"trips_used": merged}
+    return TripCountResponse(trips_used=merged)

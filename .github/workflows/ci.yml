@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_ANON_KEY: test-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+      STRIPE_SECRET_KEY: sk_test_dummy
+      STRIPE_PRICE_ID: price_test_dummy
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy
+      OSRM_BASE_URL: http://osrm.invalid
+      MAPBOX_TOKEN: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest (strict-Pydantic + OpenAPI 3.1.0 baseline)
+        run: pytest tests/ -q
+
+      - name: Emit fresh openapi.json artifact
+        run: |
+          python -c "import json, os; from app.main import app; print(json.dumps(app.openapi(), indent=2, sort_keys=True))" > openapi.json
+          test "$(jq -r .openapi openapi.json)" = "3.1.0"
+
+      - name: Upload openapi.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: openapi.json
+          retention-days: 30
+
+      - name: Verify locked baseline still matches
+        run: |
+          diff -q docs/openapi-3.1.0-locked.json openapi.json || (
+            echo "::error::OpenAPI drifted from docs/openapi-3.1.0-locked.json"
+            echo "::error::Either regenerate the lockfile or fix the route change"
+            diff -u docs/openapi-3.1.0-locked.json openapi.json | head -200 || true
+            exit 1
+          )

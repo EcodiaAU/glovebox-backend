@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
-from app.core.settings import settings
 from app.core.errors import not_found
+from app.core.settings import settings
 
 router = APIRouter()
 
@@ -34,8 +35,18 @@ def _safe_path(base: Path, *parts: str) -> Path:
     return candidate
 
 
-@router.get("/tiles/{tile_id}.pmtiles")
-def get_pmtiles(tile_id: str):
+@router.get(
+    "/tiles/{tile_id}.pmtiles",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "PMTiles archive (binary, range-served)",
+        },
+        404: {"description": "Tile not found or missing on disk"},
+    },
+)
+def get_pmtiles(tile_id: str) -> FileResponse:
     if not _SAFE_ID.match(tile_id) or tile_id != "australia":
         not_found("tile_not_found", f"unknown tile_id: {tile_id}")
 
@@ -51,8 +62,18 @@ def get_pmtiles(tile_id: str):
     return FileResponse(str(path), media_type="application/octet-stream")
 
 
-@router.get("/styles/{style_id}.style")
-def get_style(style_id: str):
+@router.get(
+    "/styles/{style_id}.style",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {"application/json": {}},
+            "description": "MapLibre style JSON",
+        },
+        404: {"description": "Style not found"},
+    },
+)
+def get_style(style_id: str) -> FileResponse:
     if not _SAFE_ID.match(style_id):
         not_found("style_not_found", "invalid style_id")
 

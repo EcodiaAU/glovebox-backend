@@ -10,8 +10,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.contracts import (
-    BBox4, OfflineBundleManifest, RouteIntelligenceScore,
-    TripPreferences, resolve_categories, density_budget_multiplier,
+    BBox4,
+    OfflineBundleManifest,
+    RouteIntelligenceScore,
+    TripPreferences,
+    resolve_categories,
+    density_budget_multiplier,
 )
 from app.core.errors import bad_request, not_found
 from app.core.storage import get_manifest, put_score_pack
@@ -184,7 +188,9 @@ async def build_bundle(
     # Resolve categories and density from user preferences
     _trip_prefs = req.trip_prefs
     _enabled_cats = resolve_categories(_trip_prefs) if _trip_prefs else None
-    _density_mult = density_budget_multiplier(_trip_prefs.stop_density) if _trip_prefs else 1.0
+    _density_mult = (
+        density_budget_multiplier(_trip_prefs.stop_density) if _trip_prefs else 1.0
+    )
 
     try:
         ppack = await loop.run_in_executor(
@@ -203,9 +209,12 @@ async def build_bundle(
     if ppack and hasattr(ppack, "items") and ppack.items:
         for item in ppack.items:
             stop_coords.append((item.lat, item.lng))
-    logger.info("corridor stop_coords: %d from places (ppack=%s, items=%d)",
-                len(stop_coords), type(ppack).__name__ if ppack else "None",
-                len(ppack.items) if ppack and hasattr(ppack, "items") and ppack.items else 0)
+    logger.info(
+        "corridor stop_coords: %d from places (ppack=%s, items=%d)",
+        len(stop_coords),
+        type(ppack).__name__ if ppack else "None",
+        len(ppack.items) if ppack and hasattr(ppack, "items") and ppack.items else 0,
+    )
 
     # 2) Build corridor using stop locations + route spine
     logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
@@ -220,7 +229,9 @@ async def build_bundle(
     cmeta = ensure_result.meta
     cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
     if not cpack:
-        not_found("corridor_missing", f"no corridor pack found for {cmeta.corridor_key}")
+        not_found(
+            "corridor_missing", f"no corridor pack found for {cmeta.corridor_key}"
+        )
 
     # 3) All remaining overlays - run concurrently.
 
@@ -243,18 +254,21 @@ async def build_bundle(
 
     async def _maybe_coverage():
         from app.core.settings import settings as _s
+
         if not _s.coverage_enabled:
             return None
         return await coverage.along_route(polyline6=req.geometry)
 
     async def _maybe_flood():
         from app.core.settings import settings as _s
+
         if not _s.flood_enabled:
             return None
         return await flood.poll(bbox=cpack.bbox)
 
     async def _maybe_wildlife():
         from app.core.settings import settings as _s
+
         if not _s.wildlife_enabled:
             return None
         return await wildlife.along_route(
@@ -315,6 +329,7 @@ async def build_bundle(
         # Generate a stable key from route_key so the score can be cached and retrieved.
         score_key = "score_" + hashlib.sha1(req.route_key.encode()).hexdigest()[:16]
         from app.core.settings import settings as _s
+
         put_score_pack(
             bundle.conn,
             score_key=score_key,
@@ -366,7 +381,9 @@ async def build_bundle(
         cameras_ready=(cameras_pack is not None),
         toilets_key=(toilets_pack.toilets_key if toilets_pack else None),
         toilets_ready=(toilets_pack is not None),
-        school_zones_key=(school_zones_pack.school_zones_key if school_zones_pack else None),
+        school_zones_key=(
+            school_zones_pack.school_zones_key if school_zones_pack else None
+        ),
         school_zones_ready=(school_zones_pack is not None),
         roadkill_key=(roadkill_pack.roadkill_key if roadkill_pack else None),
         roadkill_ready=(roadkill_pack is not None),
@@ -394,7 +411,9 @@ async def refresh_score(
         try:
             return await coro
         except Exception as exc:
-            logger.warning("score_refresh overlay '%s' failed (non-fatal): %s", name, exc)
+            logger.warning(
+                "score_refresh overlay '%s' failed (non-fatal): %s", name, exc
+            )
             return None
 
     tpack, hpack = await asyncio.gather(
@@ -405,6 +424,7 @@ async def refresh_score(
     score_result = route_score.compute(traffic=tpack, hazards=hpack)
     score_key = "score_" + hashlib.sha1(req.route_key.encode()).hexdigest()[:16]
     from app.core.settings import settings as _s
+
     put_score_pack(
         bundle.conn,
         score_key=score_key,
@@ -416,14 +436,26 @@ async def refresh_score(
 
 
 @router.get("/{plan_id}", response_model=OfflineBundleManifest)
-def get_bundle(plan_id: str, cache_conn=Depends(get_cache_conn)) -> OfflineBundleManifest:
+def get_bundle(
+    plan_id: str, cache_conn=Depends(get_cache_conn)
+) -> OfflineBundleManifest:
     row = get_manifest(cache_conn, plan_id)
     if not row:
         not_found("bundle_missing", f"no manifest for plan_id {plan_id}")
     return OfflineBundleManifest.model_validate(row)
 
 
-@router.get("/{plan_id}/download")
+@router.get(
+    "/{plan_id}/download",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "content": {"application/zip": {}},
+            "description": "Offline trip bundle zip (manifest + tiles + corridor + places + fuel)",
+        },
+        404: {"description": "Bundle not found for plan_id"},
+    },
+)
 def download_bundle(
     plan_id: str,
     bundle: Bundle = Depends(get_bundle_service),
@@ -432,5 +464,7 @@ def download_bundle(
     return StreamingResponse(
         io.BytesIO(z.zip_bytes),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="roam_bundle_{plan_id}.zip"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="roam_bundle_{plan_id}.zip"'
+        },
     )
