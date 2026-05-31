@@ -28,6 +28,7 @@ from .observations import router as observations_router
 from .peer_sync import router as peer_sync_router
 from .ai_trip import router as ai_trip_router
 from .account import router as account_router
+from .entitlement import router as entitlement_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -56,3 +57,4 @@ api_router.include_router(observations_router)
 api_router.include_router(peer_sync_router)
 api_router.include_router(ai_trip_router)
 api_router.include_router(account_router)
+api_router.include_router(entitlement_router)

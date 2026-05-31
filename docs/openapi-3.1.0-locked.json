@@ -1703,6 +1703,55 @@
         "title": "EmergencyServicesOverlay",
         "type": "object"
       },
+      "EntitlementResponse": {
+        "description": "Current effective entitlement for the authenticated user.\n\n`tier=free` with `expires_at=null` and `source_platform=null` is the\nno-purchase shape.",
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO8601 UTC. Null for `lifetime` and `free`.",
+            "title": "Expires At"
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The platform product identifier that granted this tier. Null for `free` and for `legacy` grandfather rows.",
+            "title": "Product Id"
+          },
+          "source_platform": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourcePlatform"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the entitlement was purchased. `legacy` means it came from the v1 `user_entitlements` grandfather path."
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier",
+            "description": "The user's current effective tier. `free` means no active pass and no grandfathered lifetime."
+          }
+        },
+        "required": [
+          "tier"
+        ],
+        "title": "EntitlementResponse",
+        "type": "object"
+      },
       "ErrorResponse": {
         "properties": {
           "error": {
@@ -6211,6 +6260,17 @@
         "title": "ScoreRefreshRequest",
         "type": "object"
       },
+      "SourcePlatform": {
+        "description": "Where the purchase was made (and which receipt verifier to trust).\n\n`legacy` is synthesised by the read path when the user has only a v1\n`user_entitlements` row (binary unlock, pre-v2). It never appears in the\n`entitlements` table itself.",
+        "enum": [
+          "ios",
+          "android",
+          "web",
+          "legacy"
+        ],
+        "title": "SourcePlatform",
+        "type": "string"
+      },
       "SpeedCamera": {
         "properties": {
           "camera_type": {
@@ -6627,6 +6687,17 @@
         ],
         "title": "SyncOpsResponse",
         "type": "object"
+      },
+      "Tier": {
+        "description": "User entitlement tier.\n\n`free` is the absence-of-row default; no row in the `entitlements` table\never stores `'free'`. The enum carries it so the GET endpoint can return a\ntyped value rather than null.",
+        "enum": [
+          "free",
+          "month",
+          "season",
+          "lifetime"
+        ],
+        "title": "Tier",
+        "type": "string"
       },
       "ToiletsOverlay": {
         "properties": {
@@ -8099,6 +8170,48 @@
           }
         },
         "summary": "Download Bundle"
+      }
+    },
+    "/entitlement": {
+      "get": {
+        "description": "Resolve and return the authenticated user's current effective tier.\n\nSource of truth for all three native clients (`glovebox-ios`,\n`glovebox-android`, `glovebox-web`). Resolution order is in\n`app/services/entitlements.py`. The endpoint is cheap (one indexed read,\noptional second read for the legacy grandfather check) and called on\nevery cold start of the v2 clients plus before any paywalled action.",
+        "operationId": "get_entitlement_entitlement_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Get Entitlement",
+        "tags": [
+          "entitlement"
+        ]
       }
     },
     "/guide/turn": {

@@ -506,6 +506,78 @@ class Settings(BaseSettings):
     )
 
     # ──────────────────────────────────────────────────────────────
+    # v2 billing - tiered pass + lifetime model
+    # See v2-billing-model-spec.md. Direct server-to-server receipt
+    # verification against Apple App Store Server API + Google Play
+    # Developer API; RevenueCat stays in v1 only.
+    # ──────────────────────────────────────────────────────────────
+
+    # Pass durations (days). Override in env for testing without re-deploying.
+    pass_month_days: int = Field(default=30, alias="PASS_MONTH_DAYS")
+    pass_season_days: int = Field(default=90, alias="PASS_SEASON_DAYS")
+
+    # New v2 product IDs - shared across ASC + Play + Stripe. The legacy
+    # roam_unlimited SKU is grandfathered into Lifetime by the redeem
+    # service when seen on an iOS or Android receipt.
+    product_id_month: str = Field(
+        default="glovebox_pass_month", alias="PRODUCT_ID_MONTH"
+    )
+    product_id_season: str = Field(
+        default="glovebox_pass_season", alias="PRODUCT_ID_SEASON"
+    )
+    product_id_lifetime: str = Field(
+        default="glovebox_lifetime", alias="PRODUCT_ID_LIFETIME"
+    )
+    legacy_lifetime_sku: str = Field(
+        default="roam_unlimited", alias="LEGACY_LIFETIME_SKU"
+    )
+
+    # Stripe price IDs per tier - separate from STRIPE_PRICE_ID (v1 single SKU).
+    # Optional defaults empty - the new Stripe webhook resolves prices to tiers
+    # via product metadata as a fallback when these are unset.
+    stripe_price_month: str = Field(default="", alias="STRIPE_PRICE_MONTH")
+    stripe_price_season: str = Field(default="", alias="STRIPE_PRICE_SEASON")
+    stripe_price_lifetime: str = Field(default="", alias="STRIPE_PRICE_LIFETIME")
+
+    # Apple App Store Server API
+    # Server-to-server JWS verification. Create the ASC API key in App Store
+    # Connect -> Users and Access -> Integrations -> App Store Connect API.
+    # Role: App Manager (or Developer). Stash the .p8 as base64 so it round-
+    # trips through env vars cleanly.
+    apple_app_bundle_id: str = Field(
+        default="au.ecodia.roam", alias="APPLE_APP_BUNDLE_ID"
+    )
+    apple_team_id: str = Field(default="86PUY7393S", alias="APPLE_TEAM_ID")
+    apple_asc_api_key_id: str = Field(default="", alias="APPLE_ASC_API_KEY_ID")
+    apple_asc_api_issuer_id: str = Field(default="", alias="APPLE_ASC_API_ISSUER_ID")
+    apple_asc_api_key_p8_b64: str = Field(default="", alias="APPLE_ASC_API_KEY_P8_B64")
+    # Production by default - sandbox is fallback when the prod call returns
+    # 21007 (this receipt is sandbox).
+    apple_app_store_server_base_url: str = Field(
+        default="https://api.storekit.itunes.apple.com",
+        alias="APPLE_APP_STORE_SERVER_BASE_URL",
+    )
+    apple_app_store_server_sandbox_base_url: str = Field(
+        default="https://api.storekit-sandbox.itunes.apple.com",
+        alias="APPLE_APP_STORE_SERVER_SANDBOX_BASE_URL",
+    )
+
+    # Google Play Developer API
+    # Service account JSON with `androidpublisher` scope, added to the app's
+    # Play Console access list. Path is a file on disk in the container; in
+    # Cloud Run mount as a Secret. Falls back to the inline base64 env var
+    # when no file path is set, which keeps local dev cred-free.
+    google_play_package_name: str = Field(
+        default="au.ecodia.roam", alias="GOOGLE_PLAY_PACKAGE_NAME"
+    )
+    google_play_service_account_json_path: str = Field(
+        default="", alias="GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH"
+    )
+    google_play_service_account_json_b64: str = Field(
+        default="", alias="GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64"
+    )
+
+    # ──────────────────────────────────────────────────────────────
     # Weather overlay - Open-Meteo BOM ACCESS-G (self-hosted or public)
     # Self-hosted: set OPEN_METEO_BASE_URL to your instance (e.g. http://localhost:8080).
     # Self-hosted Open-Meteo (AGPLv3 engine) syncing ECMWF IFS 0.25° model.
