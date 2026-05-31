@@ -5,8 +5,12 @@ end-to-end. Conductor reads this file to verify progress; updated after every
 feature batch.
 
 ## Phase
-**A + B + C + D + E - shipped 2026-05-31.** Moving to F (product-ID
-configuration in ASC + Play + Stripe).
+**Worker arc COMPLETE 2026-05-31.** All 5 code phases shipped + pushed.
+Phase F is conductor-only operational work (GUI gates + cred grants).
+Provisioning scripts and Dockerfile hook authored; conductor runs them
+with the right creds in env.
+
+**Worker exits cleanly. Conductor handoff list below.**
 
 ## Discoveries flagged to conductor (need conductor decision or action)
 
@@ -117,18 +121,85 @@ configuration in ASC + Play + Stripe).
       redemptions return the same `granted=True` shape
 - [x] Android `purchase_state != 0` (pending / canceled) returns 403
 - [x] 13 new tests; CI green (61/61); locked OpenAPI 52 routes
-### Phase F - Product ID configuration in ASC/Play/Stripe (pending)
+### Phase F - Product ID configuration (scripts authored, conductor runs)
+- [x] `scripts/provision_stripe_v2_products.py` - idempotent Stripe
+      Product + Price creation. Conductor runs with
+      `STRIPE_SECRET_KEY=sk_live_...` and pastes the printed
+      `STRIPE_PRICE_MONTH/_SEASON/_LIFETIME` env vars into Cloud Run.
+- [x] `scripts/provision_play_v2_products.py` - Play `inappproducts.insert`
+      for all 3 SKUs. Attempted from this worker; got 403 because the
+      Play uploader service account at
+      `D:/PRIVATE/ecodia-creds/play/play-uploader-key.json` does not have
+      access to `au.ecodia.roam`. **Conductor: grant the SA "Admin
+      (all permissions)" or "Manage store presence + Manage in-app
+      products" role on au.ecodia.roam in Play Console -> Users and
+      permissions, then re-run.**
+- [ ] **ASC: GUI-only.** Conductor opens
+      https://appstoreconnect.apple.com -> Glovebox -> Monetization -> In-App
+      Purchases and creates three IAPs under bundle `au.ecodia.roam`:
+      - `glovebox_pass_month` (Non-Renewing Subscription, AUD 9.99)
+      - `glovebox_pass_season` (Non-Renewing Subscription, AUD 19.99)
+      - `glovebox_lifetime` (Non-Consumable, AUD 34.99)
+      All need review screenshots, localised descriptions, and
+      Apple-side review submission. Three reviews in parallel.
+- [x] `scripts/fetch-apple-root-certs.sh` - curls
+      AppleRootCA-G3.cer + AppleWWDRCAG6.cer into the target dir.
+- [x] Dockerfile updated: installs curl + ca-certificates,
+      runs the fetch script during build into
+      `/app/app/data/apple-roots`. Cloud Run env should set
+      `APPLE_ROOT_CERT_BUNDLE_PATH=/app/app/data/apple-roots`.
 
 ## Last Fly deploy version
 N/A - target is Cloud Run, not Fly. Last Cloud Run revision: unknown to this
 worker (conductor probes `gcloud run services describe roam-backend --region
 australia-southeast1` to verify).
 
-## Next action
-Phase C: Apple App Store Server API receipt verification. New module
-`app/services/apple_receipt.py` that verifies a JWS signed transaction with
-Apple's public keys, extracts `productId` + `transactionId` +
-`originalPurchaseDate`, detects the legacy `roam_unlimited` SKU for
-grandfathering. Reads ASC API key from settings (`apple_asc_api_key_*`).
-Targeted commit: "feat(v2-billing): Apple App Store Server API receipt
-verification + grandfather".
+## Conductor handoff - the ten things to do after this worker exits
+
+1. **Cloud Run deploy** of the new commits (A-E + F-Dockerfile):
+   ```
+   cd D:/.code/glovebox/backend
+   gcloud run deploy roam-backend \
+     --source . \
+     --region australia-southeast1 \
+     --project <gcp project id>
+   ```
+2. **Grant Play SA access** on `au.ecodia.roam` (see Phase F note above),
+   then run:
+   ```
+   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH=D:/PRIVATE/ecodia-creds/play/play-uploader-key.json \
+     python scripts/provision_play_v2_products.py
+   ```
+3. **Stripe products**: run
+   `STRIPE_SECRET_KEY=sk_live_... python scripts/provision_stripe_v2_products.py`
+   on a machine with the glovebox Stripe key. Copy the three printed
+   `STRIPE_PRICE_*` env vars to Cloud Run.
+4. **ASC IAP records**: manual via App Store Connect (see Phase F note).
+5. **Set Cloud Run env vars** post-deploy:
+   - `STRIPE_PRICE_MONTH`, `STRIPE_PRICE_SEASON`, `STRIPE_PRICE_LIFETIME`
+   - `APPLE_ROOT_CERT_BUNDLE_PATH=/app/app/data/apple-roots`
+   - `APPLE_APP_APPLE_ID=<numeric ASC app id>`
+   - `APPLE_ASC_API_KEY_ID`, `APPLE_ASC_API_ISSUER_ID`,
+     `APPLE_ASC_API_KEY_P8_B64`
+   - `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64=<base64 of SA JSON>` or mount
+     a Secret volume + set `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH`
+6. **Mint `GLOVEBOX_BACKEND_BOT_TOKEN`** as a fine-grained PAT scoped to
+   `EcodiaTate/glovebox-ios` + `glovebox-android` + `glovebox-web` with
+   `contents: write` + `metadata: read`. Stash at
+   `kv_store.creds.github_glovebox_backend_bot` AND as the GH Actions
+   secret on `EcodiaTate/glovebox-backend`. Without this the
+   `bump-clients.yml` workflow uploads `openapi.json` as an artifact but
+   skips the per-repo dispatches.
+7. **Verify the deploy** via
+   `curl https://roam-backend-176723812810.australia-southeast1.run.app/entitlement`
+   with a real Supabase JWT - should return `{"tier":"free",...}` for a
+   fresh user.
+8. **Smoke-test the redeem path** with a sandbox iOS receipt once ASC
+   IAP records are approved + a sandbox Apple ID has purchased one.
+9. **Smoke-test the Stripe v2 path** via
+   `POST /stripe/checkout/v2 {"tier":"month"}` -> follow the URL ->
+   complete with a test card -> verify the new `entitlements` row lands.
+10. **Update the three native client repos** when the auto-PR opens
+    (after step 6, the next backend push triggers `bump-clients.yml`
+    which dispatches `openapi-bump` events to each native repo, and
+    each repo's CI regenerates its typed client folder).
