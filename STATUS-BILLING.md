@@ -5,7 +5,7 @@ end-to-end. Conductor reads this file to verify progress; updated after every
 feature batch.
 
 ## Phase
-**A + B - shipped 2026-05-31.** Moving to C (Apple App Store Server API).
+**A + B + C - shipped 2026-05-31.** Moving to D (Google Play).
 
 ## Discoveries flagged to conductor (need conductor decision or action)
 
@@ -86,7 +86,16 @@ feature batch.
 - [x] 12 new tests; CI green (24/24)
 - [x] OpenAPI regenerated (51 routes)
 - [ ] Conductor-driven `gcloud run deploy` (flagged)
-### Phase C - Apple App Store Server API path (pending)
+### Phase C - Apple App Store Server API path (shipped 2026-05-31)
+- [x] Plan written
+- [x] Added `app-store-server-library>=1.6.0` to requirements
+- [x] `app/services/apple_receipt.py` - `verify_signed_transaction()`
+      with library-path and dev-mode-decode-only fallback
+- [x] `roam_unlimited` grandfather detection on `is_grandfather_eligible`
+- [x] 14 new tests; CI green (36/36)
+- [ ] Conductor: download Apple root certs to container at
+      `app/data/apple-roots/` + set `APPLE_ROOT_CERT_BUNDLE_PATH` env var
+      + set `APPLE_APP_APPLE_ID` from ASC listing
 ### Phase D - Google Play Developer API path (pending)
 ### Phase E - Unified POST /entitlement/redeem + grandfather (pending)
 ### Phase F - Product ID configuration in ASC/Play/Stripe (pending)

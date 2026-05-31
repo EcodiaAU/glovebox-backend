@@ -577,6 +577,20 @@ class Settings(BaseSettings):
         default="", alias="GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64"
     )
 
+    # Apple root certificates - bundle directory containing AppleRootCA-G3.cer
+    # + any intermediates. Required for full JWS verification; when empty the
+    # apple_receipt service runs in decode-only mode with a loud warning so
+    # production deploys cannot silently skip signature verification.
+    apple_root_cert_bundle_path: str = Field(
+        default="", alias="APPLE_ROOT_CERT_BUNDLE_PATH"
+    )
+    # Numeric App Store Connect app id (the `1234567890` from ASC URLs).
+    # Required by app-store-server-library's SignedDataVerifier. Default 0 is
+    # invalid; the conductor fills this from the App Store Connect listing.
+    apple_app_apple_id: int = Field(default=0, alias="APPLE_APP_APPLE_ID")
+    # Toggle to use sandbox verifier in test environments.
+    apple_use_sandbox: bool = Field(default=False, alias="APPLE_USE_SANDBOX")
+
     # ──────────────────────────────────────────────────────────────
     # Weather overlay - Open-Meteo BOM ACCESS-G (self-hosted or public)
     # Self-hosted: set OPEN_METEO_BASE_URL to your instance (e.g. http://localhost:8080).
