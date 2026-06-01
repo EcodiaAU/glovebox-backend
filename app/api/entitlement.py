@@ -5,8 +5,15 @@
 #   GET  /entitlement         - current effective tier for the authed user
 #   POST /entitlement/redeem  - client-supplied receipt -> server verifies -> grant
 #
-# Both endpoints return `EntitlementResponse` shaped payloads so a successful
-# redeem can be consumed by the same client code path that consumes GET.
+# Both endpoints nest the entitlement under an `entitlement` key so the shipped
+# glovebox-ios client decodes a redeem response with the same `EntitlementWrapper`
+# code path it uses for GET. GET returns `EntitlementEnvelope`; redeem returns
+# `RedeemResponse` (which also carries the additive `granted` / `grandfathered`
+# booleans the Android/web generated clients read and iOS ignores).
+#
+# Request-shape compatibility: redeem accepts BOTH the shipped-iOS shape
+# (`{product_id, receipt_data, source}`, no `platform`) and the original
+# `{platform, receipt}` shape. See app/core/billing_models.py::RedeemRequest.
 
 from __future__ import annotations
 
@@ -18,16 +25,19 @@ from fastapi.responses import JSONResponse
 
 from app.core.auth import AuthUser, get_current_user
 from app.core.billing_models import (
-    EntitlementResponse,
+    EntitlementEnvelope,
     RedeemRequest,
     RedeemResponse,
+    RedeemSource,
     SourcePlatform,
     Tier,
 )
 from app.core.error_models import ErrorResponse
+from app.core.settings import settings
 from app.services.apple_receipt import (
     AppleTransactionPayload,
     ReceiptError,
+    verify_app_store_receipt,
     verify_signed_transaction,
 )
 from app.services.entitlements import (
@@ -35,6 +45,7 @@ from app.services.entitlements import (
     get_current_entitlement,
     tier_from_product_id,
     upsert_entitlement,
+    user_has_legacy_entitlement,
 )
 from app.services.play_purchase import (
     PlayPurchaseError,
@@ -57,7 +68,7 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 @router.get(
     "",
-    response_model=EntitlementResponse,
+    response_model=EntitlementEnvelope,
     responses={
         401: {"model": ErrorResponse},
         500: {"model": ErrorResponse},
@@ -65,17 +76,19 @@ def _error(message: str, status_code: int) -> JSONResponse:
 )
 async def get_entitlement(
     user: AuthUser = Depends(get_current_user),
-) -> EntitlementResponse:
+) -> EntitlementEnvelope:
     """Resolve and return the authenticated user's current effective tier.
 
     Source of truth for all three native clients (`glovebox-ios`,
-    `glovebox-android`, `glovebox-web`). Resolution order is in
-    `app/services/entitlements.py`. The endpoint is cheap (one indexed read,
-    optional second read for the legacy grandfather check) and called on
-    every cold start of the v2 clients plus before any paywalled action.
+    `glovebox-android`, `glovebox-web`). Wrapped under `entitlement` so the
+    shipped iOS client's `EntitlementWrapper` decodes it directly. Resolution
+    order is in `app/services/entitlements.py`. The endpoint is cheap (one
+    indexed read, optional second read for the legacy grandfather check) and
+    called on every cold start of the v2 clients plus before any paywalled
+    action.
     """
 
-    return get_current_entitlement(user.id)
+    return EntitlementEnvelope(entitlement=get_current_entitlement(user.id))
 
 
 @router.post(
@@ -99,10 +112,14 @@ async def redeem_entitlement(
     deliberately rejected: web purchases flow through the Stripe Checkout +
     webhook path, never through this endpoint.
 
-    Grandfather behaviour: when the verified receipt names the legacy
-    `roam_unlimited` SKU, the server grants `Tier.LIFETIME` regardless of
-    the tier the client suggested. The response's `grandfathered=True`
-    flag tells the client to update its UI without surprise.
+    Grandfather behaviour: there are two ways a redeem grants Lifetime as a
+    grandfather. (1) The verified receipt names the legacy `roam_unlimited`
+    SKU. (2) The shipped iOS client sends `source="grandfather"` (it detected
+    the v1 non-consumable in `Transaction.currentEntitlements`); the server
+    confirms a prior v1 purchase via the `user_entitlements` table or the
+    receipt before granting, so the grant is gated on a real purchase signal
+    rather than a bare client claim. Either way the response's
+    `grandfathered=True` flag tells the client to update its UI.
 
     Idempotency: the `(source_platform, transaction_id)` unique index on
     `public.entitlements` absorbs duplicate redemptions from flaky clients
@@ -119,6 +136,12 @@ async def redeem_entitlement(
             400,
         )
 
+    # Grandfather short-circuit (shipped iOS client path). The client signals a
+    # legacy v1 buyer with source="grandfather"; we confirm the prior purchase
+    # before granting Lifetime so the grant can't be forged by a bare claim.
+    if body.redeem_source == RedeemSource.GRANDFATHER:
+        return _redeem_grandfather(body, user)
+
     try:
         if body.platform == SourcePlatform.IOS:
             verified = _verify_ios(body)
@@ -130,7 +153,7 @@ async def redeem_entitlement(
         logger.info(
             "[entitlement/redeem] verification rejected for user=%s platform=%s: %s",
             user.id,
-            body.platform.value,
+            body.platform.value if body.platform else "ios",
             exc,
         )
         return _error(str(exc), 403)
@@ -157,15 +180,24 @@ async def redeem_entitlement(
         if tier == Tier.FREE:
             return _error("verified product maps to free tier", 400)
 
+    # Human-facing source: grandfather wins; else the client's stated source
+    # (purchase/restore), defaulting to purchase.
+    human_source = (
+        "grandfather"
+        if grandfathered
+        else (body.redeem_source.value if body.redeem_source else "purchase")
+    )
+
     try:
         upsert_entitlement(
             user_id=user.id,
             tier=tier,
-            source_platform=body.platform,
+            source_platform=body.platform or SourcePlatform.IOS,
             product_id=verified["product_id"],
             transaction_id=verified["transaction_id"],
             expires_at=expiry_for_tier(tier, verified["purchase_date"]),
             raw_receipt=verified["raw_payload"],
+            source=human_source,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.error(
@@ -189,21 +221,34 @@ async def redeem_entitlement(
 
 
 def _verify_ios(body: RedeemRequest) -> dict[str, Any]:
-    """Pull the iOS JWS string from the receipt envelope and verify it.
+    """Verify an iOS receipt, accepting both the JWS and base64-blob shapes.
 
-    The client sends `receipt: {"signed_transaction_info": "<JWS>"}`. Raises
-    ReceiptError when the envelope is missing the expected key or the JWS
-    fails verification.
+    Two shapes, in priority order:
+
+    * StoreKit-2 JWS: `receipt: {"signed_transaction_info": "<JWS>"}`. Verified
+      against Apple's root cert chain by `verify_signed_transaction`.
+    * Legacy base64 receipt blob (the shipped iOS client): `receipt_data` (or
+      `receipt: {"receipt_data": ...}`). Verified against Apple's
+      `/verifyReceipt` by `verify_app_store_receipt`.
+
+    Raises ReceiptError when neither is present or verification fails.
     """
 
     signed = body.receipt.get("signed_transaction_info") or body.receipt.get(
         "signedTransactionInfo"
     )
-    if not signed:
-        raise ReceiptError(
-            "ios receipt must contain signed_transaction_info (JWS string)"
+    if signed:
+        payload: AppleTransactionPayload = verify_signed_transaction(signed)
+    else:
+        receipt_blob = body.receipt_data or body.receipt.get("receipt_data")
+        if not receipt_blob:
+            raise ReceiptError(
+                "ios receipt must contain signed_transaction_info (JWS string) "
+                "or receipt_data (base64 App Store receipt)"
+            )
+        payload = verify_app_store_receipt(
+            receipt_blob, expected_product_id=body.product_id
         )
-    payload: AppleTransactionPayload = verify_signed_transaction(signed)
     return {
         "transaction_id": payload.transaction_id,
         "product_id": payload.product_id,
@@ -245,3 +290,79 @@ def _verify_android(body: RedeemRequest) -> dict[str, Any]:
         "is_grandfather_eligible": payload.is_grandfather_eligible,
         "raw_payload": payload.raw_payload,
     }
+
+
+# ── Grandfather path (shipped iOS client, source="grandfather") ────────────
+
+
+def _redeem_grandfather(
+    body: RedeemRequest, user: AuthUser
+) -> RedeemResponse | JSONResponse:
+    """Grant Lifetime to a confirmed legacy v1 buyer.
+
+    The grant is gated on a real prior-purchase signal so it can't be forged:
+
+    1. A `roam_unlimited` transaction in the verified App Store receipt
+       (`receipt_data`), OR
+    2. an existing `user_entitlements` row for this user.
+
+    When neither holds, returns 403. When granted, writes an idempotent
+    Lifetime row (`source_platform=ios`, `source=grandfather`) keyed on the
+    real Apple transaction id when available, else a deterministic synthetic
+    id so re-redeems are no-ops.
+    """
+
+    transaction_id: str | None = None
+    raw_receipt: dict[str, Any] | None = None
+    receipt_confirmed_legacy = False
+
+    receipt_blob = body.receipt_data or body.receipt.get("receipt_data")
+    if receipt_blob:
+        try:
+            payload = verify_app_store_receipt(
+                receipt_blob, expected_product_id=settings.legacy_lifetime_sku
+            )
+            raw_receipt = payload.raw_payload
+            if payload.is_grandfather_eligible:
+                receipt_confirmed_legacy = True
+                transaction_id = payload.transaction_id
+        except ReceiptError as exc:
+            # A bad/dev-shaped blob is not fatal here - we can still grandfather
+            # off the legacy table below. Log and continue.
+            logger.info(
+                "[entitlement/redeem] grandfather receipt not verifiable for "
+                "user=%s (%s); falling back to legacy-table check",
+                user.id,
+                exc,
+            )
+
+    if not receipt_confirmed_legacy and not user_has_legacy_entitlement(user.id):
+        return _error("no prior roam_unlimited purchase found to grandfather", 403)
+
+    if not transaction_id:
+        # Deterministic synthetic id so repeat grandfather redeems are
+        # idempotent on (source_platform, transaction_id).
+        transaction_id = f"legacy-grandfather:{user.id}"
+
+    try:
+        upsert_entitlement(
+            user_id=user.id,
+            tier=Tier.LIFETIME,
+            source_platform=SourcePlatform.IOS,
+            product_id=settings.legacy_lifetime_sku,
+            transaction_id=transaction_id,
+            expires_at=None,
+            raw_receipt=raw_receipt,
+            source="grandfather",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(
+            "[entitlement/redeem] grandfather upsert failed for user=%s: %s",
+            user.id,
+            exc,
+            exc_info=True,
+        )
+        return _error("could not record entitlement", 502)
+
+    current = get_current_entitlement(user.id)
+    return RedeemResponse(granted=True, entitlement=current, grandfathered=True)

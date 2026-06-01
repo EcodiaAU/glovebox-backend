@@ -1717,8 +1717,21 @@
         "title": "EmergencyServicesOverlay",
         "type": "object"
       },
+      "EntitlementEnvelope": {
+        "description": "Single-key wrapper the native clients decode.\n\nThe iOS client's `EntitlementWrapper` reads `{\"entitlement\": {...}}`; the\nAndroid/web generated clients read the same wrapper. GET and the redeem\nsuccess body both nest the entitlement under this key.",
+        "properties": {
+          "entitlement": {
+            "$ref": "#/components/schemas/EntitlementResponse"
+          }
+        },
+        "required": [
+          "entitlement"
+        ],
+        "title": "EntitlementEnvelope",
+        "type": "object"
+      },
       "EntitlementResponse": {
-        "description": "Current effective entitlement for the authenticated user.\n\n`tier=free` with `expires_at=null` and `source_platform=null` is the\nno-purchase shape.",
+        "description": "Current effective entitlement for the authenticated user.\n\n`tier=free` with `expires_at=null` and `source=free` is the no-purchase\nshape. `source` is the field the iOS client reads (`Entitlement.source`);\n`source_platform`/`product_id` are richer, optional, and ignored by iOS.",
         "properties": {
           "expires_at": {
             "anyOf": [
@@ -1743,6 +1756,18 @@
             ],
             "description": "The platform product identifier that granted this tier. Null for `free` and for `legacy` grandfather rows.",
             "title": "Product Id"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Human-facing provenance the client surfaces: one of `free` / `purchase` / `restore` / `grandfather` / `legacy`. Derived from `source_platform` + how the row was written.",
+            "title": "Source"
           },
           "source_platform": {
             "anyOf": [
@@ -5347,11 +5372,18 @@
         "type": "object"
       },
       "RedeemRequest": {
-        "description": "Client-supplied receipt for server verification.\n\nThe `receipt` shape is platform-specific (Apple `signedTransactionInfo`\nJWS, Google purchase token + product id, or Stripe Checkout Session id).\nThe receipt is opaque to the request schema; verification happens in the\nplatform-specific service layer.",
+        "description": "Client-supplied receipt for server verification.\n\nTwo accepted shapes:\n\n* iOS (shipped client): `{product_id, receipt_data: <base64 str>,\n  source: \"purchase|restore|grandfather\"}`. No `platform` - it is inferred\n  as `ios`. `receipt_data` is the base64 App Store receipt blob.\n* Android / web generated clients: `{platform, product_id, receipt}` where\n  `receipt` is `{purchase_token, product_id}` (Android) or\n  `{signed_transaction_info: <JWS>}` (a future StoreKit-2 iOS client).\n\n`model_validator` normalises the iOS shape into the canonical\n`(platform, receipt, redeem_source)` the route consumes, so the endpoint\nhas one code path regardless of which client called it.",
         "properties": {
           "platform": {
-            "$ref": "#/components/schemas/SourcePlatform",
-            "description": "Where the purchase was made. `legacy` is not accepted by the redeem endpoint - it is a server-side synthesis only."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourcePlatform"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the purchase was made. Inferred as `ios` when omitted (the shipped iOS client sends no platform). `legacy` is not accepted - it is a server-side synthesis only."
           },
           "product_id": {
             "description": "Platform product identifier (e.g. `glovebox_pass_month`).",
@@ -5359,21 +5391,42 @@
             "type": "string"
           },
           "receipt": {
-            "description": "Platform-specific verification payload. iOS: `{signed_transaction_info: <JWS>}`. Android: `{purchase_token: str, product_id: str}`. Web: `{stripe_session_id: str}`.",
+            "description": "Platform-specific verification payload. iOS (StoreKit 2): `{signed_transaction_info: <JWS>}`. Android: `{purchase_token: str, product_id: str}`. Web: `{stripe_session_id: str}`.",
             "title": "Receipt",
             "type": "object"
+          },
+          "receipt_data": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Base64 App Store receipt blob sent by the shipped iOS client. Folded into `receipt.receipt_data` during validation.",
+            "title": "Receipt Data"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RedeemSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the client is redeeming. `grandfather` triggers the v1 legacy-purchase check that grants Lifetime."
           }
         },
         "required": [
-          "platform",
-          "product_id",
-          "receipt"
+          "product_id"
         ],
         "title": "RedeemRequest",
         "type": "object"
       },
       "RedeemResponse": {
-        "description": "Result of a redeem call - same shape as GET /entitlement after success.",
+        "description": "Result of a redeem call.\n\nNests the resulting entitlement under `entitlement` so the iOS client's\n`EntitlementWrapper` decodes a redeem response with the same code path it\nuses for GET. `granted`/`grandfathered` are additive booleans the iOS\nclient ignores and the Android/web clients can read.",
         "properties": {
           "entitlement": {
             "$ref": "#/components/schemas/EntitlementResponse",
@@ -5397,6 +5450,16 @@
         ],
         "title": "RedeemResponse",
         "type": "object"
+      },
+      "RedeemSource": {
+        "description": "Why the client is redeeming, as sent by the iOS client's `source` field.\n\nInformational on the server side except for `grandfather`, which lets a\nclient signal \"this is a legacy v1 buyer\" so the server checks the v1\n`user_entitlements` / `roam_unlimited` purchase and grants Lifetime.",
+        "enum": [
+          "purchase",
+          "restore",
+          "grandfather"
+        ],
+        "title": "RedeemSource",
+        "type": "string"
       },
       "RestArea": {
         "properties": {
@@ -8240,14 +8303,14 @@
     },
     "/entitlement": {
       "get": {
-        "description": "Resolve and return the authenticated user's current effective tier.\n\nSource of truth for all three native clients (`glovebox-ios`,\n`glovebox-android`, `glovebox-web`). Resolution order is in\n`app/services/entitlements.py`. The endpoint is cheap (one indexed read,\noptional second read for the legacy grandfather check) and called on\nevery cold start of the v2 clients plus before any paywalled action.",
+        "description": "Resolve and return the authenticated user's current effective tier.\n\nSource of truth for all three native clients (`glovebox-ios`,\n`glovebox-android`, `glovebox-web`). Wrapped under `entitlement` so the\nshipped iOS client's `EntitlementWrapper` decodes it directly. Resolution\norder is in `app/services/entitlements.py`. The endpoint is cheap (one\nindexed read, optional second read for the legacy grandfather check) and\ncalled on every cold start of the v2 clients plus before any paywalled\naction.",
         "operationId": "get_entitlement_entitlement_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EntitlementResponse"
+                  "$ref": "#/components/schemas/EntitlementEnvelope"
                 }
               }
             },
@@ -8282,7 +8345,7 @@
     },
     "/entitlement/redeem": {
       "post": {
-        "description": "Verify a platform-specific receipt and grant the corresponding tier.\n\niOS and Android receipts are verified server-to-server against Apple's\nJWS public keys / Google's Play Developer API. The web path is\ndeliberately rejected: web purchases flow through the Stripe Checkout +\nwebhook path, never through this endpoint.\n\nGrandfather behaviour: when the verified receipt names the legacy\n`roam_unlimited` SKU, the server grants `Tier.LIFETIME` regardless of\nthe tier the client suggested. The response's `grandfathered=True`\nflag tells the client to update its UI without surprise.\n\nIdempotency: the `(source_platform, transaction_id)` unique index on\n`public.entitlements` absorbs duplicate redemptions from flaky clients\nor auto-retries. The endpoint always returns the user's current\neffective entitlement after the call, so a duplicate redeem returns\nthe same `granted=True` shape as the first one.",
+        "description": "Verify a platform-specific receipt and grant the corresponding tier.\n\niOS and Android receipts are verified server-to-server against Apple's\nJWS public keys / Google's Play Developer API. The web path is\ndeliberately rejected: web purchases flow through the Stripe Checkout +\nwebhook path, never through this endpoint.\n\nGrandfather behaviour: there are two ways a redeem grants Lifetime as a\ngrandfather. (1) The verified receipt names the legacy `roam_unlimited`\nSKU. (2) The shipped iOS client sends `source=\"grandfather\"` (it detected\nthe v1 non-consumable in `Transaction.currentEntitlements`); the server\nconfirms a prior v1 purchase via the `user_entitlements` table or the\nreceipt before granting, so the grant is gated on a real purchase signal\nrather than a bare client claim. Either way the response's\n`grandfathered=True` flag tells the client to update its UI.\n\nIdempotency: the `(source_platform, transaction_id)` unique index on\n`public.entitlements` absorbs duplicate redemptions from flaky clients\nor auto-retries. The endpoint always returns the user's current\neffective entitlement after the call, so a duplicate redeem returns\nthe same `granted=True` shape as the first one.",
         "operationId": "redeem_entitlement_entitlement_redeem_post",
         "requestBody": {
           "content": {

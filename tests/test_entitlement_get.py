@@ -8,6 +8,10 @@ Covers the resolution rules in `app/services/entitlements.py`:
   - Legacy `user_entitlements` row only -> tier='lifetime', source='legacy'
   - Lifetime in `entitlements` beats an unexpired month pass
 
+Wire shape: the response is wrapped under `entitlement` (the shipped iOS
+client's `EntitlementWrapper` decodes `{"entitlement": {...}}`), and the
+entitlement object carries a human-facing `source` string the client reads.
+
 Plus a 401 path on the unauthed client.
 """
 
@@ -20,16 +24,22 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _ent(resp_json: dict) -> dict:
+    """Unwrap the `{"entitlement": {...}}` envelope the clients decode."""
+    assert "entitlement" in resp_json, resp_json
+    return resp_json["entitlement"]
+
+
 # ── Free-tier branches ────────────────────────────────────────────────────
 
 
 def test_no_rows_returns_free(client, fake_supabase, authed_user_id):
     resp = client.get("/entitlement")
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body == {
+    assert _ent(resp.json()) == {
         "tier": "free",
         "expires_at": None,
+        "source": "free",
         "source_platform": None,
         "product_id": None,
     }
@@ -47,7 +57,7 @@ def test_expired_pass_returns_free(client, fake_supabase, authed_user_id):
     ]
     resp = client.get("/entitlement")
     assert resp.status_code == 200
-    assert resp.json()["tier"] == "free"
+    assert _ent(resp.json())["tier"] == "free"
 
 
 # ── Active pass branches ──────────────────────────────────────────────────
@@ -60,14 +70,16 @@ def test_active_month_pass(client, fake_supabase, authed_user_id):
             "user_id": authed_user_id,
             "tier": "month",
             "expires_at": _iso(expires),
+            "source": "purchase",
             "source_platform": "ios",
             "product_id": "glovebox_pass_month",
         }
     ]
     resp = client.get("/entitlement")
     assert resp.status_code == 200
-    body = resp.json()
+    body = _ent(resp.json())
     assert body["tier"] == "month"
+    assert body["source"] == "purchase"
     assert body["source_platform"] == "ios"
     assert body["product_id"] == "glovebox_pass_month"
     assert body["expires_at"].startswith(str(expires.year))
@@ -84,7 +96,7 @@ def test_active_season_pass(client, fake_supabase, authed_user_id):
             "product_id": "glovebox_pass_season",
         }
     ]
-    body = client.get("/entitlement").json()
+    body = _ent(client.get("/entitlement").json())
     assert body["tier"] == "season"
     assert body["source_platform"] == "android"
 
@@ -98,14 +110,16 @@ def test_lifetime_row(client, fake_supabase, authed_user_id):
             "user_id": authed_user_id,
             "tier": "lifetime",
             "expires_at": None,
+            "source": "purchase",
             "source_platform": "web",
             "product_id": "glovebox_lifetime",
         }
     ]
-    body = client.get("/entitlement").json()
+    body = _ent(client.get("/entitlement").json())
     assert body == {
         "tier": "lifetime",
         "expires_at": None,
+        "source": "purchase",
         "source_platform": "web",
         "product_id": "glovebox_lifetime",
     }
@@ -130,7 +144,7 @@ def test_lifetime_beats_active_month_pass(client, fake_supabase, authed_user_id)
             "product_id": "glovebox_lifetime",
         },
     ]
-    body = client.get("/entitlement").json()
+    body = _ent(client.get("/entitlement").json())
     assert body["tier"] == "lifetime"
 
 
@@ -147,10 +161,11 @@ def test_legacy_user_entitlements_grandfathers_to_lifetime(
             "source": "revenuecat",
         }
     ]
-    body = client.get("/entitlement").json()
+    body = _ent(client.get("/entitlement").json())
     assert body == {
         "tier": "lifetime",
         "expires_at": None,
+        "source": "legacy",
         "source_platform": "legacy",
         "product_id": None,
     }
@@ -176,7 +191,7 @@ def test_v2_row_beats_legacy_user_entitlements(client, fake_supabase, authed_use
             "source": "stripe",
         }
     ]
-    body = client.get("/entitlement").json()
+    body = _ent(client.get("/entitlement").json())
     assert body["tier"] == "season"
     assert body["source_platform"] == "android"
 

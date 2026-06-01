@@ -591,6 +591,26 @@ class Settings(BaseSettings):
     # Toggle to use sandbox verifier in test environments.
     apple_use_sandbox: bool = Field(default=False, alias="APPLE_USE_SANDBOX")
 
+    # Apple App Store *receipt* shared secret (the "App-Specific Shared Secret"
+    # from App Store Connect -> App -> App Information -> App-Specific Shared
+    # Secret, OR the master shared secret under Users and Access -> Shared
+    # Secret). Required ONLY for the legacy base64 receipt-blob path
+    # (`verify_app_store_receipt`) that the shipped iOS client uses via its
+    # `receipt_data` field. The StoreKit-2 JWS path
+    # (`verify_signed_transaction`) does not need it. When empty the receipt
+    # path runs in decode-only dev mode with a loud WARNING, mirroring the JWS
+    # path, so a misconfigured prod is visible in logs rather than silently
+    # trusting the client-supplied blob.
+    apple_shared_secret: str = Field(default="", alias="APPLE_SHARED_SECRET")
+    apple_verify_receipt_url: str = Field(
+        default="https://buy.itunes.apple.com/verifyReceipt",
+        alias="APPLE_VERIFY_RECEIPT_URL",
+    )
+    apple_verify_receipt_sandbox_url: str = Field(
+        default="https://sandbox.itunes.apple.com/verifyReceipt",
+        alias="APPLE_VERIFY_RECEIPT_SANDBOX_URL",
+    )
+
     # ──────────────────────────────────────────────────────────────
     # Weather overlay - Open-Meteo BOM ACCESS-G (self-hosted or public)
     # Self-hosted: set OPEN_METEO_BASE_URL to your instance (e.g. http://localhost:8080).

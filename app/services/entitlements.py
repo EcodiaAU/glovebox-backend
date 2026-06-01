@@ -59,7 +59,7 @@ def get_current_entitlement(user_id: str) -> EntitlementResponse:
     # nulls first`), then active passes by furthest expiry.
     result = (
         supa.table("entitlements")
-        .select("tier, expires_at, source_platform, product_id")
+        .select("tier, expires_at, source, source_platform, product_id")
         .eq("user_id", user_id)
         .order("expires_at", desc=True, nullsfirst=True)
         .limit(5)
@@ -75,6 +75,7 @@ def get_current_entitlement(user_id: str) -> EntitlementResponse:
             return EntitlementResponse(
                 tier=Tier.LIFETIME,
                 expires_at=None,
+                source=_effective_source(row),
                 source_platform=SourcePlatform(row.get("source_platform"))
                 if row.get("source_platform")
                 else None,
@@ -86,6 +87,7 @@ def get_current_entitlement(user_id: str) -> EntitlementResponse:
             return EntitlementResponse(
                 tier=Tier(tier_raw),
                 expires_at=expires_at_raw,
+                source=_effective_source(row),
                 source_platform=SourcePlatform(row.get("source_platform"))
                 if row.get("source_platform")
                 else None,
@@ -105,6 +107,7 @@ def get_current_entitlement(user_id: str) -> EntitlementResponse:
         return EntitlementResponse(
             tier=Tier.LIFETIME,
             expires_at=None,
+            source="legacy",
             source_platform=SourcePlatform.LEGACY,
             product_id=None,
         )
@@ -113,9 +116,47 @@ def get_current_entitlement(user_id: str) -> EntitlementResponse:
     return EntitlementResponse(
         tier=Tier.FREE,
         expires_at=None,
+        source="free",
         source_platform=None,
         product_id=None,
     )
+
+
+def _effective_source(row: dict[str, Any]) -> str:
+    """Human-facing provenance for a v2 `entitlements` row.
+
+    Prefer the stored `source` column (written by the redeem path as
+    `purchase` / `restore` / `grandfather`). Fall back to `purchase` when the
+    column is absent (older rows written before the column existed) so the iOS
+    client always sees a non-null, sensible value.
+    """
+
+    stored = row.get("source")
+    if stored:
+        return str(stored)
+    return "purchase"
+
+
+def user_has_legacy_entitlement(user_id: str) -> bool:
+    """True when the user has any v1 `user_entitlements` row.
+
+    That table is binary - one row means the v1 client (RevenueCat / Stripe)
+    confirmed the `roam_unlimited` unlock - so its presence is a real prior
+    purchase signal, the same signal `frontend/.../tripGate.ts` treats as
+    unlocked. Used by the redeem endpoint's grandfather path to gate the
+    Lifetime grant on a real purchase. Kept here (not in the route) so the
+    test's `fake_supabase` patch on this module covers it.
+    """
+
+    supa = get_supabase_admin()
+    result = (
+        supa.table("user_entitlements")
+        .select("id")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    return bool(getattr(result, "data", None) or [])
 
 
 # ── Write: upsert a verified entitlement row ──────────────────────────────
@@ -130,12 +171,18 @@ def upsert_entitlement(
     transaction_id: str,
     expires_at: Optional[datetime],
     raw_receipt: Optional[dict[str, Any]],
+    source: Optional[str] = None,
 ) -> dict[str, Any]:
     """Idempotent insert into `public.entitlements`.
 
     Unique on (source_platform, transaction_id). Redeeming the same receipt
     twice from a flaky client is a no-op; the upsert returns the existing row.
     Lifetime rows pass `expires_at=None`.
+
+    `source` is the human-facing provenance the clients surface
+    (`purchase` / `restore` / `grandfather`); when omitted it defaults to
+    `purchase`. It is independent of `source_platform`, which records the
+    storefront for idempotency + verifier routing.
 
     Returns the row that landed (whether newly inserted or pre-existing).
     """
@@ -150,17 +197,23 @@ def upsert_entitlement(
     row = {
         "user_id": user_id,
         "tier": tier.value,
+        "source": source or "purchase",
         "source_platform": source_platform.value,
         "product_id": product_id,
         "transaction_id": transaction_id,
         "expires_at": expires_at.isoformat() if expires_at else None,
         "raw_receipt": raw_receipt,
+        # Bumped on every upsert so a duplicate redeem (same idempotency key)
+        # is still observable. Mirrors the `updated_at = now()` pattern the v1
+        # increment_trip_count RPC uses; the column ships in migration 010.
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     logger.info(
-        "[entitlements] upsert user=%s tier=%s platform=%s product=%s txn=%s expires=%s",
+        "[entitlements] upsert user=%s tier=%s source=%s platform=%s product=%s txn=%s expires=%s",
         user_id,
         tier.value,
+        row["source"],
         source_platform.value,
         product_id,
         transaction_id,
