@@ -4266,6 +4266,27 @@
             "title": "Corridor Status",
             "type": "string"
           },
+          "corridor_tiles_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corridor Tiles Key"
+          },
+          "corridor_tiles_status": {
+            "default": "missing",
+            "enum": [
+              "missing",
+              "ready",
+              "error"
+            ],
+            "title": "Corridor Tiles Status",
+            "type": "string"
+          },
           "coverage_key": {
             "anyOf": [
               {

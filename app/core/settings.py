@@ -11,6 +11,14 @@ class Settings(BaseSettings):
     data_dir: str = Field(default="app/data", alias="DATA_DIR")
     cache_db_path: str = Field(default="app/data/roam_cache.db", alias="CACHE_DB_PATH")
 
+    # Per-trip z16 corridor street tiles. Produced out-of-band (tilemaker needs
+    # Docker+OSM, absent on Cloud Run) and stored in Supabase Storage, durable
+    # and shared across ephemeral instances. The bundle includes them best-effort
+    # ONLY when enabled; default off means the bundle is byte-identical to today
+    # and iOS keeps falling back to the nationwide z14 pack.
+    corridor_tiles_enabled: bool = Field(default=False, alias="CORRIDOR_TILES_ENABLED")
+    corridor_tiles_bucket: str = Field(default="corridor-tiles", alias="CORRIDOR_TILES_BUCKET")
+
     # Edges DB - Postgres+PostGIS (production). Takes priority over edges_db_path.
     edges_database_url: str | None = Field(default=None, alias="EDGES_DATABASE_URL")
 

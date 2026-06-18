@@ -18,8 +18,10 @@ from app.core.contracts import (
     density_budget_multiplier,
 )
 from app.core.errors import bad_request, not_found
+from app.core.settings import settings
 from app.core.storage import get_manifest, put_score_pack
 from app.core.time import utc_now_iso
+from app.services import corridor_tiles
 from app.services.bundle import Bundle
 from app.services.corridor import Corridor
 from app.services.coverage import Coverage
@@ -409,6 +411,12 @@ async def build_bundle(
         school_zones_ready=(school_zones_pack is not None),
         roadkill_key=(roadkill_pack.roadkill_key if roadkill_pack else None),
         roadkill_ready=(roadkill_pack is not None),
+        # Per-trip street-zoom corridor tiles. The key is derived from the
+        # corridor bbox so the bundle endpoint and the out-of-band producer
+        # agree on it; readiness tracks the feature flag (the actual pack is
+        # fetched best-effort at build_zip time, falling back gracefully).
+        corridor_tiles_key=corridor_tiles.corridor_tiles_key(cpack.bbox),
+        corridor_tiles_ready=settings.corridor_tiles_enabled,
     )
 
 
