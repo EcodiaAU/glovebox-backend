@@ -991,6 +991,7 @@ class OfflineBundleManifest(BaseModel):
 
     corridor_key: Optional[str] = None
     corridor_tiles_key: Optional[str] = None
+    corridor_tiles_bbox: Optional[str] = None
     places_key: Optional[str] = None
     traffic_key: Optional[str] = None
     hazards_key: Optional[str] = None

@@ -417,6 +417,10 @@ async def build_bundle(
         # fetched best-effort at build_zip time, falling back gracefully).
         corridor_tiles_key=corridor_tiles.corridor_tiles_key(cpack.bbox),
         corridor_tiles_ready=settings.corridor_tiles_enabled,
+        corridor_tiles_bbox=(
+            f"{cpack.bbox.minLng},{cpack.bbox.minLat},"
+            f"{cpack.bbox.maxLng},{cpack.bbox.maxLat}"
+        ),
     )
 
 

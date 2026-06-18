@@ -39,10 +39,40 @@ def _build_zip(conn: sqlite3.Connection, *, ctk: str | None, ready: bool):
         plan_id="plan-x", route_key="route-x", styles=["bright"], navpack_ready=True,
         corridor_key="corr-x", corridor_ready=True,
         corridor_tiles_key=ctk, corridor_tiles_ready=ready,
+        corridor_tiles_bbox="136.5,-32.7,138.0,-31.0",
         places_key=None, places_ready=False, traffic_key=None, traffic_ready=False,
         hazards_key=None, hazards_ready=False,
     )
     return b.build_zip(plan_id="plan-x")
+
+
+def test_miss_records_generation_request(monkeypatch) -> None:
+    # On a storage miss with a key present, build_zip records a generation
+    # request carrying the corridor bbox so the worker can build the pack.
+    monkeypatch.setattr(corridor_tiles, "fetch_from_storage", lambda key: None)
+    noted = {}
+    monkeypatch.setattr(corridor_tiles, "note_missing_pack",
+                        lambda key, bbox: noted.update(key=key, bbox=bbox))
+    conn = _conn()
+    _seed_core(conn, "route-x", "corr-x")
+    _build_zip(conn, ctk="ct_missing", ready=True)
+    assert noted == {"key": "ct_missing", "bbox": "136.5,-32.7,138.0,-31.0"}
+
+
+def test_no_request_when_no_key(monkeypatch) -> None:
+    monkeypatch.setattr(corridor_tiles, "fetch_from_storage", lambda key: None)
+    called = []
+    monkeypatch.setattr(corridor_tiles, "note_missing_pack", lambda key, bbox: called.append(1))
+    conn = _conn()
+    _seed_core(conn, "route-x", "corr-x")
+    _build_zip(conn, ctk=None, ready=False)
+    assert called == []
+
+
+def test_note_missing_pack_noop_when_flag_off(monkeypatch) -> None:
+    monkeypatch.setattr(corridor_tiles.settings, "corridor_tiles_enabled", False)
+    # Must not raise and must not touch Supabase when the flag is off.
+    corridor_tiles.note_missing_pack("ct_x", "1,2,3,4")
 
 
 def test_key_is_stable_and_bbox_quantised() -> None:

@@ -146,6 +146,7 @@ class Bundle:
         roadkill_ready: bool = False,
         corridor_tiles_key: str | None = None,
         corridor_tiles_ready: bool = False,
+        corridor_tiles_bbox: str | None = None,
     ) -> OfflineBundleManifest:
         # Build key map for bulk byte-size query - only include ready overlays.
         ready_flags = {
@@ -210,6 +211,7 @@ class Bundle:
             roadkill_status="ready" if roadkill_ready else "missing",
             corridor_key=corridor_key,
             corridor_tiles_key=corridor_tiles_key,
+            corridor_tiles_bbox=corridor_tiles_bbox,
             places_key=places_key,
             traffic_key=traffic_key,
             hazards_key=hazards_key,
@@ -303,6 +305,13 @@ class Bundle:
             corridor_tiles_blob = corridor_tiles.fetch_from_storage(manifest.corridor_tiles_key)
             if corridor_tiles_blob:
                 z.writestr("corridor-tiles.pmtiles", corridor_tiles_blob)
+            elif manifest.corridor_tiles_key:
+                # No pack yet for this corridor: record a generation request so
+                # the out-of-band worker builds it for this exact bbox. Next trip
+                # over the corridor then gets street tiles. Best-effort, no-raise.
+                corridor_tiles.note_missing_pack(
+                    manifest.corridor_tiles_key, manifest.corridor_tiles_bbox
+                )
 
         zip_bytes = buf.getvalue()
 

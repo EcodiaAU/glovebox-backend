@@ -48,6 +48,36 @@ def storage_path(key: str) -> str:
     return f"{key}.pmtiles"
 
 
+def request_path(key: str) -> str:
+    return f"_requests/{key}.json"
+
+
+def note_missing_pack(key: str | None, bbox: str | None) -> None:
+    """Drop a generation-request marker so the out-of-band worker
+    (tiles/fulfil-corridor-requests.sh) builds and uploads the pack for THIS
+    exact corridor bbox. That makes the system self-populating: the first trip
+    over a corridor records the need, the worker fills it, and later trips on
+    the same corridor get street tiles. Upsert keeps repeated misses idempotent.
+    Best-effort and flag-gated; never raises into the bundle hot path.
+    """
+    if not key or not bbox or not settings.corridor_tiles_enabled:
+        return
+    try:
+        import orjson
+
+        from app.core.supabase_admin import get_supabase_admin
+
+        payload = orjson.dumps({"key": key, "bbox": bbox, "maxzoom": 16})
+        get_supabase_admin().storage.from_(settings.corridor_tiles_bucket).upload(
+            request_path(key),
+            payload,
+            {"content-type": "application/json", "upsert": "true"},
+        )
+        logger.info("corridor-tiles generation requested: %s (%s)", key, bbox)
+    except Exception as exc:  # noqa: BLE001 - best-effort; never break the bundle
+        logger.info("corridor-tiles request note failed for %s: %s", key, exc)
+
+
 def fetch_from_storage(key: str | None) -> bytes | None:
     """Download a corridor pmtiles by key from Supabase Storage, or None.
 
