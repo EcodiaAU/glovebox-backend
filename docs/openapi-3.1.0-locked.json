@@ -4266,6 +4266,17 @@
             "title": "Corridor Status",
             "type": "string"
           },
+          "corridor_tiles_bbox": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corridor Tiles Bbox"
+          },
           "corridor_tiles_key": {
             "anyOf": [
               {
