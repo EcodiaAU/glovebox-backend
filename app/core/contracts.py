@@ -977,6 +977,8 @@ class OfflineBundleManifest(BaseModel):
 
     navpack_status: AssetStatus = "missing"
     corridor_status: AssetStatus = "missing"
+    # z16 street-zoom corridor pmtiles for offline turn-by-turn street view.
+    corridor_tiles_status: AssetStatus = "missing"
     places_status: AssetStatus = "missing"
     traffic_status: AssetStatus = "missing"
     hazards_status: AssetStatus = "missing"
@@ -988,6 +990,7 @@ class OfflineBundleManifest(BaseModel):
     wildlife_status: AssetStatus = "missing"
 
     corridor_key: Optional[str] = None
+    corridor_tiles_key: Optional[str] = None
     places_key: Optional[str] = None
     traffic_key: Optional[str] = None
     hazards_key: Optional[str] = None
