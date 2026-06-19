@@ -18,6 +18,7 @@ from app.core.contracts import (
     density_budget_multiplier,
 )
 from app.core.errors import bad_request, not_found
+from app.core.polyline6 import decode_polyline6
 from app.core.settings import settings
 from app.core.storage import get_manifest, put_score_pack
 from app.core.time import utc_now_iso
@@ -240,22 +241,49 @@ async def build_bundle(
         type(ppack).__name__ if ppack else "None",
     )
 
-    # 2) Build corridor using stop locations + route spine
+    # 2) Build corridor using stop locations + route spine. A COLD build (OSRM +
+    # roam-backend both scaling from zero) can exceed Cloud Run's request timeout
+    # and previously RAISED -> the bundle "500" the client saw on the first
+    # attempt (the second, warm, succeeded). Degrade gracefully: if the corridor
+    # build fails, ship the bundle WITHOUT the offline-reroute corridor (route
+    # spine + places + overlays still ship) rather than 500. It builds warm on the
+    # next attempt; corridor_ready in the manifest tells the client.
     logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
-    ensure_result = corridor.ensure(
-        route_key=req.route_key,
-        route_polyline6=req.geometry,
-        profile=profile,
-        buffer_m=buffer_m,
-        max_edges=max_edges,
-        stop_coords=stop_coords,
-    )
-    cmeta = ensure_result.meta
-    cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
-    if not cpack:
-        not_found(
-            "corridor_missing", f"no corridor pack found for {cmeta.corridor_key}"
+    cmeta = None
+    cpack = None
+    try:
+        ensure_result = corridor.ensure(
+            route_key=req.route_key,
+            route_polyline6=req.geometry,
+            profile=profile,
+            buffer_m=buffer_m,
+            max_edges=max_edges,
+            stop_coords=stop_coords,
         )
+        cmeta = ensure_result.meta
+        cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
+    except Exception as exc:
+        logger.warning(
+            "bundle corridor.ensure failed (non-fatal; bundle ships without corridor): %s",
+            exc,
+        )
+
+    # Bbox for the bbox-keyed overlays + corridor tiles. Prefer the corridor pack's
+    # bbox; if the corridor build failed, derive it from the route geometry so the
+    # overlays and the corridor-tiles key still resolve.
+    if cpack is not None:
+        corridor_bbox = cpack.bbox
+    else:
+        _coords = decode_polyline6(req.geometry) if req.geometry else []
+        if _coords:
+            _lats = [c[0] for c in _coords]
+            _lngs = [c[1] for c in _coords]
+            corridor_bbox = BBox4(
+                minLng=min(_lngs), minLat=min(_lats),
+                maxLng=max(_lngs), maxLat=max(_lats),
+            )
+        else:
+            corridor_bbox = BBox4(minLng=0.0, minLat=0.0, maxLng=0.0, maxLat=0.0)
 
     # 3) All remaining overlays - run concurrently.
 
@@ -288,7 +316,7 @@ async def build_bundle(
 
         if not _s.flood_enabled:
             return None
-        return await flood.poll(bbox=cpack.bbox)
+        return await flood.poll(bbox=corridor_bbox)
 
     async def _maybe_wildlife():
         from app.core.settings import settings as _s
@@ -318,8 +346,8 @@ async def build_bundle(
         school_zones_pack,
         roadkill_pack,
     ) = await asyncio.gather(
-        _safe(traffic.poll(bbox=cpack.bbox), "traffic"),  # type: ignore[union-attr]
-        _safe(hazards.poll(bbox=cpack.bbox), "hazards"),  # type: ignore[union-attr]
+        _safe(traffic.poll(bbox=corridor_bbox), "traffic"),
+        _safe(hazards.poll(bbox=corridor_bbox), "hazards"),
         _safe(_maybe_weather(), "weather"),
         _safe(_maybe_coverage(), "coverage"),
         _safe(fuel.along_route(polyline6=req.geometry), "fuel"),
@@ -371,8 +399,8 @@ async def build_bundle(
         route_key=req.route_key,
         styles=req.styles,
         navpack_ready=True,
-        corridor_key=cmeta.corridor_key,
-        corridor_ready=True,
+        corridor_key=(cmeta.corridor_key if cmeta else req.route_key),
+        corridor_ready=(cpack is not None),
         places_key=(ppack.places_key if ppack else None),
         places_ready=(ppack is not None),
         traffic_key=(tpack.traffic_key if tpack else None),
@@ -415,11 +443,11 @@ async def build_bundle(
         # corridor bbox so the bundle endpoint and the out-of-band producer
         # agree on it; readiness tracks the feature flag (the actual pack is
         # fetched best-effort at build_zip time, falling back gracefully).
-        corridor_tiles_key=corridor_tiles.corridor_tiles_key(cpack.bbox),
+        corridor_tiles_key=corridor_tiles.corridor_tiles_key(corridor_bbox),
         corridor_tiles_ready=settings.corridor_tiles_enabled,
         corridor_tiles_bbox=(
-            f"{cpack.bbox.minLng},{cpack.bbox.minLat},"
-            f"{cpack.bbox.maxLng},{cpack.bbox.maxLat}"
+            f"{corridor_bbox.minLng},{corridor_bbox.minLat},"
+            f"{corridor_bbox.maxLng},{corridor_bbox.maxLat}"
         ),
     )
 
