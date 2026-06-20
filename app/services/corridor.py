@@ -185,9 +185,16 @@ class Corridor:
         ckey = corridor_key(route_key, buffer_m, max_edges, profile, self.algo_version,
                            stop_count=len(stop_coords) if stop_coords else 0)
 
-        # Check cache first
+        # Check cache first. SKIP a degenerate cached corridor (0 nodes): an
+        # earlier broken build (OSRM down, or a stale empty/short-geometry
+        # request) can cache a 0-node corridor with a (0,0) bbox for this
+        # route_key, which then poisons every later build - the offline bundle
+        # ships an empty corridor (no reroute) and the z16 corridor-tiles key
+        # derived from that bbox resolves to empty ocean, so offline TBT falls
+        # back to the coarse z14 basemap. Treat a node-less cached pack as a miss
+        # and rebuild from the real geometry. (Glovebox offline-coarse 2026-06-20.)
         existing = get_corridor_pack(self.cache_conn, ckey)
-        if existing:
+        if existing and existing.get("nodes"):
             pack = CorridorGraphPack.model_validate(existing)
             meta = CorridorGraphMeta(
                 corridor_key=ckey,
