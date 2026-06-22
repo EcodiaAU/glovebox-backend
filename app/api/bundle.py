@@ -187,9 +187,13 @@ async def build_bundle(
     buffer_m = int(req.buffer_m or 5000)
     max_edges = int(req.max_edges or 2000000)
 
-    # 1) Fetch places FIRST - we need stop coordinates for the corridor.
-    #    search_bundle is sync (httpx.Client) so run in thread executor.
-    #    Pass trip preferences to control density + category filtering.
+    # 1) Fetch places. This is the POI Overpass corridor query - a live probe
+    #    showed it is the single biggest first-trip cost (~90-100s cold on a long
+    #    route), NOT the corridor graph. It feeds the corridor stop_coords + the
+    #    POI dots. Navigation needs neither, so a nav-only (phase-1) build SKIPS
+    #    it: the manifest returns in ~seconds with just the nav pack + corridor-
+    #    tiles key, and places (dots) + corridor + overlays all arrive in the
+    #    later full build. This is what makes "download -> navigate" near-instant.
     loop = asyncio.get_event_loop()
     ppack = None
 
@@ -200,17 +204,18 @@ async def build_bundle(
         density_budget_multiplier(_trip_prefs.stop_density) if _trip_prefs else 1.0
     )
 
-    try:
-        ppack = await loop.run_in_executor(
-            None,
-            lambda: places.search_bundle(
-                polyline6=req.geometry,
-                categories=_enabled_cats,  # type: ignore[arg-type]
-                density_multiplier=_density_mult,
-            ),
-        )
-    except Exception as exc:
-        logger.warning("bundle places fetch failed (non-fatal): %s", exc)
+    if not req.nav_only:
+        try:
+            ppack = await loop.run_in_executor(
+                None,
+                lambda: places.search_bundle(
+                    polyline6=req.geometry,
+                    categories=_enabled_cats,  # type: ignore[arg-type]
+                    density_multiplier=_density_mult,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("bundle places fetch failed (non-fatal): %s", exc)
 
     # Extract stop coordinates for corridor building.
     #
