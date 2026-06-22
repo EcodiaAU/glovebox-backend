@@ -2615,6 +2615,19 @@ class Places:
             logger.warning("places_store ingest from supa FAILED: %r", e)
 
     def _finalize_and_cache_pack(self, pack: PlacesPack, *, publish_to_supa: bool) -> PlacesPack:
+        # Wikipedia/Wikidata enrichment: fill description + thumbnail on POIs that
+        # carry a wikidata/wikipedia tag but lack inline detail (towns, parks,
+        # landmarks). CC BY-SA, cached in the SQLite cache DB (90d TTL), capped +
+        # best-effort, so cold packs pay once and repeats are instant. Baked into
+        # the pack BEFORE caching so the cache HIT path serves enriched items.
+        # Runs only on the places path (full bundle build), never the nav tier.
+        if pack.items:
+            try:
+                from app.services import wiki_enrich
+                wiki_enrich.enrich_items(pack.items, self.cache_conn)
+            except Exception as exc:
+                logger.warning("wiki enrichment failed (non-fatal): %s", exc)
+
         if publish_to_supa and self.supa is not None and pack.items:
             cap = int(getattr(settings, "supa_places_publish_cap", 4000))
             cap = max(0, cap)
