@@ -1362,6 +1362,22 @@ def _element_to_item(el: Dict[str, Any]) -> Optional[PlaceItem]:
     if tags.get("toilets") == "yes" or tags.get("amenity") == "toilets":
         extra["has_toilets"] = True
 
+    # ── Normalise has_* amenity aliases ───────────────────────
+    # The boolean-tag loop above captures the bare OSM keys (showers / dump /
+    # bbq) and the camp enricher emits the has_*-prefixed form. Mirror the bare
+    # keys to the has_* contract so EVERY category (rest areas, picnic sites,
+    # not just camps) presents one consistent amenity vocabulary to clients.
+    if extra.get("showers") is True:
+        extra.setdefault("has_showers", True)
+    if extra.get("dump") is True or extra.get("amenity") == "sanitary_dump_station":
+        extra.setdefault("has_dump_point", True)
+    if extra.get("bbq") is True or tags.get("amenity") == "bbq":
+        extra.setdefault("has_bbq", True)
+    if str(tags.get("internet_access", "")) in ("yes", "wlan", "wifi"):
+        extra.setdefault("has_wifi", True)
+    if tags.get("swimming") == "yes" or tags.get("leisure") == "swimming_pool":
+        extra.setdefault("has_swimming", True)
+
     # ── Camping-specific enrichment ───────────────────────────
     if category == "camp":
         _enrich_camp_tags(tags, extra)
@@ -1971,6 +1987,55 @@ def _score_place(
 
 
 # ──────────────────────────────────────────────────────────────
+# Suggestion quality floor
+# ──────────────────────────────────────────────────────────────
+# Categories where a pin WITHOUT a name is still useful - "where is the
+# nearest X" infrastructure. A nameless fuel stop / water point / toilet /
+# rest area / dump point is genuinely valuable on a remote-route map.
+_LOCATION_IS_ENOUGH_CATS: frozenset[str] = frozenset({
+    "fuel", "ev_charging", "water", "water_fill", "toilet", "rest_area",
+    "dump_point", "shower", "mechanic", "hospital", "pharmacy", "atm",
+    "emergency_phone", "camp", "grocery", "town", "visitor_info", "laundromat",
+})
+
+# Low-value "padding" categories that are pure noise on a roaming map when they
+# have no name and no data - dense suburban OSM ships thousands of these and the
+# diversify overflow used to backfill them to hit the limit (e.g. 141 nameless
+# playgrounds on a Brisbane->Roma outback corridor). A nameless one of these
+# tells a traveller nothing actionable, so drop it.
+_PADDING_CATS: frozenset[str] = frozenset({
+    "playground", "park", "picnic", "pool", "dog_park", "golf", "cinema",
+    "library", "fast_food", "bar",
+})
+
+
+def _is_useful_candidate(item: PlaceItem) -> bool:
+    """Whether a POI is worth surfacing as a suggestion.
+
+    Drops synthetic-named (nameless) items in low-value padding categories, the
+    main source of corridor junk. Keeps nameless infrastructure where the pin
+    location alone is decision-useful, and keeps anything that carries a real
+    name or any rich data signal.
+    """
+    extra = item.extra or {}
+    cat = str(item.category)
+    if not extra.get("synthetic_name"):
+        return True  # has a real name -> keep
+    if cat in _LOCATION_IS_ENOUGH_CATS:
+        return True  # nameless but the location itself is the value
+    if cat in _PADDING_CATS:
+        return False  # nameless padding -> drop
+    # Other nameless POIs (e.g. a nameless waterfall): keep only if they carry
+    # at least one substantive data signal, else they are an unactionable pin.
+    return bool(
+        extra.get("thumbnail_url")
+        or extra.get("wikidata")
+        or extra.get("description")
+        or extra.get("website")
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # Landmark extraction from regional knowledge
 # ──────────────────────────────────────────────────────────────
 
@@ -2303,6 +2368,17 @@ def _corridor_diversify(
        per-category caps
     5. Fill remaining slots with overflow from any category
     """
+    if not candidates:
+        return []
+
+    # ── Quality floor: drop nameless padding POIs before selection so the
+    # overflow fill can't backfill the corridor with unactionable junk
+    # (e.g. dozens of nameless playgrounds on a remote highway). ──
+    _pre = len(candidates)
+    candidates = [c for c in candidates if _is_useful_candidate(c)]
+    if len(candidates) != _pre:
+        logger.info("corridor_diversify quality floor: %d -> %d (dropped %d nameless padding)",
+                    _pre, len(candidates), _pre - len(candidates))
     if not candidates:
         return []
 
@@ -3506,6 +3582,11 @@ class Places:
                 limit=int(limit_per_sample),
             )
             pack = self.search(preq)
+            # Quality floor: strip nameless padding POIs so a tapped suggestion
+            # cluster contains actionable places, not unnamed playgrounds.
+            useful = [it for it in pack.items if _is_useful_candidate(it)]
+            if len(useful) != len(pack.items):
+                pack = pack.model_copy(update={"items": useful})
             out.append(
                 {
                     "idx": idx,
