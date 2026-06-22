@@ -243,7 +243,7 @@ class Bundle:
         )
         return m
 
-    def build_zip(self, *, plan_id: str) -> BundleZipResult:
+    def build_zip(self, *, plan_id: str, nav_only: bool = False) -> BundleZipResult:
         # Read manifest to get the keys for each pack.
         manifest_row = get_manifest(self.conn, plan_id)
         if not manifest_row:
@@ -293,7 +293,15 @@ class Bundle:
             z.writestr("manifest.json", b_manifest)
             z.writestr("navpack.json", b_nav)
             z.writestr("corridor.json", b_corr)
+            # Phase-1 (navigate-now) tier ships only the nav-critical members:
+            # manifest + navpack + corridor + corridor-tiles, plus places (already
+            # built, small, gives the POI dots immediately). The 16 richness
+            # overlays (traffic/hazards/weather/fuel/.../roadkill) are streamed by
+            # a later full-tier download so the user can offline-navigate the
+            # moment the small nav zip lands.
             for pack_type, zip_name in _OVERLAY_ZIP_NAMES.items():
+                if nav_only and pack_type != "places":
+                    continue
                 blob = raw_blobs.get(pack_type)
                 if blob:
                     z.writestr(zip_name, blob)
