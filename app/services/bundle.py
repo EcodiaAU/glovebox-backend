@@ -243,7 +243,7 @@ class Bundle:
         )
         return m
 
-    def build_zip(self, *, plan_id: str) -> BundleZipResult:
+    def build_zip(self, *, plan_id: str, nav_only: bool = False) -> BundleZipResult:
         # Read manifest to get the keys for each pack.
         manifest_row = get_manifest(self.conn, plan_id)
         if not manifest_row:
@@ -270,9 +270,13 @@ class Bundle:
         # Single bulk fetch of all raw blobs.
         raw_blobs = bulk_pack_raw(self.conn, overlay_keys)
 
-        # Corridor is required.
+        # Corridor (offline-reroute graph) is required for the full tier but
+        # OPTIONAL for the nav tier: a phase-1 nav build skips the ~100s cold
+        # corridor build, and the client navigates the planned route from the nav
+        # pack alone (it falls back to the cached primary route when no corridor
+        # index is present). The corridor lands in the later full-tier download.
         b_corr = raw_blobs.get("corridor")
-        if not b_corr:
+        if not b_corr and not nav_only:
             if not manifest.corridor_key:
                 not_found("corridor_missing", "manifest has no corridor_key")
             not_found("corridor_missing", f"no corridor cached for corridor_key {manifest.corridor_key}")
@@ -287,13 +291,24 @@ class Bundle:
         # compresslevel=1 is fastest DEFLATE (Zlib level 1: speed >> size).
         # JSON compresses well at any level; level 1 is ~3-5× faster than default 6.
         assert b_nav is not None, "b_nav guaranteed by not_found guard above"
-        assert b_corr is not None, "b_corr guaranteed by not_found guard above"
+        # b_corr is guaranteed non-None for the full tier by the guard above; for
+        # the nav tier it may be absent (corridor deferred), so it is written only
+        # when present.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as z:
             z.writestr("manifest.json", b_manifest)
             z.writestr("navpack.json", b_nav)
-            z.writestr("corridor.json", b_corr)
+            if b_corr:
+                z.writestr("corridor.json", b_corr)
+            # Phase-1 (navigate-now) tier ships only the nav-critical members:
+            # manifest + navpack + corridor + corridor-tiles, plus places (already
+            # built, small, gives the POI dots immediately). The 16 richness
+            # overlays (traffic/hazards/weather/fuel/.../roadkill) are streamed by
+            # a later full-tier download so the user can offline-navigate the
+            # moment the small nav zip lands.
             for pack_type, zip_name in _OVERLAY_ZIP_NAMES.items():
+                if nav_only and pack_type != "places":
+                    continue
                 blob = raw_blobs.get(pack_type)
                 if blob:
                     z.writestr(zip_name, blob)
@@ -321,7 +336,7 @@ class Bundle:
             bytes_zip=len(zip_bytes),
             bytes_manifest=len(b_manifest),
             bytes_navpack=len(b_nav),
-            bytes_corridor=len(b_corr),
+            bytes_corridor=len(b_corr or b""),
             bytes_places=len(raw_blobs.get("places") or b""),
             bytes_traffic=len(raw_blobs.get("traffic") or b""),
             bytes_hazards=len(raw_blobs.get("hazards") or b""),

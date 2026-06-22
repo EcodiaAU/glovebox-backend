@@ -145,6 +145,11 @@ class BundleBuildRequest(BaseModel):
     avg_speed_kmh: float = 90.0
     # Trip preferences - controls stop density & category filtering
     trip_prefs: TripPreferences | None = None
+    # Phase-1 (navigate-now) build: skip the 16 live overlay Overpass/API queries
+    # + the route score so the manifest returns as soon as the nav-critical packs
+    # (places-for-corridor + corridor graph + corridor-tiles key) are ready. The
+    # overlays are richness, not navigation, and are fetched by a later full build.
+    nav_only: bool = False
 
 
 @router.post("/build", response_model=OfflineBundleManifest)
@@ -248,25 +253,34 @@ async def build_bundle(
     # build fails, ship the bundle WITHOUT the offline-reroute corridor (route
     # spine + places + overlays still ship) rather than 500. It builds warm on the
     # next attempt; corridor_ready in the manifest tells the client.
-    logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
     cmeta = None
     cpack = None
-    try:
-        ensure_result = corridor.ensure(
-            route_key=req.route_key,
-            route_polyline6=req.geometry,
-            profile=profile,
-            buffer_m=buffer_m,
-            max_edges=max_edges,
-            stop_coords=stop_coords,
-        )
-        cmeta = ensure_result.meta
-        cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
-    except Exception as exc:
-        logger.warning(
-            "bundle corridor.ensure failed (non-fatal; bundle ships without corridor): %s",
-            exc,
-        )
+    # The corridor graph is the offline-REROUTE structure, built by OSRM tree-
+    # routing - a COLD build (OSRM + roam-backend scaling from zero) is the single
+    # biggest first-trip cost (~100s observed). Navigation of the PLANNED route
+    # does not need it: the nav pack already carries that route's turn-by-turn and
+    # the client falls back to it (NavService returns the cached navpack primary
+    # when no corridor index is present). So a nav-only (phase-1) build SKIPS the
+    # corridor build entirely - it is fetched by the later full build for offline
+    # reroute. This is what makes "create route -> download -> navigate" near-instant.
+    if not req.nav_only:
+        logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
+        try:
+            ensure_result = corridor.ensure(
+                route_key=req.route_key,
+                route_polyline6=req.geometry,
+                profile=profile,
+                buffer_m=buffer_m,
+                max_edges=max_edges,
+                stop_coords=stop_coords,
+            )
+            cmeta = ensure_result.meta
+            cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
+        except Exception as exc:
+            logger.warning(
+                "bundle corridor.ensure failed (non-fatal; bundle ships without corridor): %s",
+                exc,
+            )
 
     # Bbox for the bbox-keyed overlays + corridor tiles. Prefer the corridor pack's
     # bbox; if the corridor build failed, derive it from the route geometry so the
@@ -285,7 +299,16 @@ async def build_bundle(
         else:
             corridor_bbox = BBox4(minLng=0.0, minLat=0.0, maxLng=0.0, maxLat=0.0)
 
-    # 3) All remaining overlays - run concurrently.
+    # 3) All remaining overlays - run concurrently. Skipped entirely for a
+    #    nav-only (phase-1) build: navigation needs only the corridor graph +
+    #    nav pack + corridor tiles, so the 16 live Overpass/API overlay queries
+    #    (the slow part, esp. cold) do not block the navigate-now manifest. A
+    #    later full build (nav_only=false) fetches + caches them.
+    tpack = hpack = wpack = cov_pack = fuel_pack = flood_pack = None
+    wildlife_pack = rest_pack = emergency_pack = heritage_pack = aqi_pack = None
+    bushfire_pack = cameras_pack = toilets_pack = school_zones_pack = roadkill_pack = None
+    score_pack = None
+    score_key = None
 
     async def _safe(coro_or_awaitable, name: str):
         """Await a coroutine; return None and log on any exception."""
@@ -328,70 +351,69 @@ async def build_bundle(
             departure_iso=req.departure_iso,
         )
 
-    (
-        tpack,
-        hpack,
-        wpack,
-        cov_pack,
-        fuel_pack,
-        flood_pack,
-        wildlife_pack,
-        rest_pack,
-        emergency_pack,
-        heritage_pack,
-        aqi_pack,
-        bushfire_pack,
-        cameras_pack,
-        toilets_pack,
-        school_zones_pack,
-        roadkill_pack,
-    ) = await asyncio.gather(
-        _safe(traffic.poll(bbox=corridor_bbox), "traffic"),
-        _safe(hazards.poll(bbox=corridor_bbox), "hazards"),
-        _safe(_maybe_weather(), "weather"),
-        _safe(_maybe_coverage(), "coverage"),
-        _safe(fuel.along_route(polyline6=req.geometry), "fuel"),
-        _safe(_maybe_flood(), "flood"),
-        _safe(_maybe_wildlife(), "wildlife"),
-        _safe(rest_areas.along_route(polyline6=req.geometry), "rest_areas"),
-        _safe(emergency_svc.along_route(polyline6=req.geometry), "emergency"),
-        _safe(heritage_svc.along_route(polyline6=req.geometry), "heritage"),
-        _safe(air_quality_svc.along_route(polyline6=req.geometry), "air_quality"),
-        _safe(bushfire_svc.along_route(polyline6=req.geometry), "bushfire"),
-        _safe(speed_cameras_svc.along_route(polyline6=req.geometry), "speed_cameras"),
-        _safe(toilets_svc.along_route(polyline6=req.geometry), "toilets"),
-        _safe(school_zones_svc.along_route(polyline6=req.geometry), "school_zones"),
-        _safe(roadkill_svc.along_route(polyline6=req.geometry), "roadkill"),
-    )
-
-    # 3) Route intelligence score - synchronous, uses overlay results gathered above.
-    score_pack = None
-    score_key = None
-    try:
-        score_result = route_score.compute(
-            weather=wpack,
-            fuel=fuel_pack,
-            flood=flood_pack,
-            rest=rest_pack,
-            coverage=cov_pack,
-            wildlife=wildlife_pack,
-            traffic=tpack,
-            hazards=hpack,
+    if not req.nav_only:
+        (
+            tpack,
+            hpack,
+            wpack,
+            cov_pack,
+            fuel_pack,
+            flood_pack,
+            wildlife_pack,
+            rest_pack,
+            emergency_pack,
+            heritage_pack,
+            aqi_pack,
+            bushfire_pack,
+            cameras_pack,
+            toilets_pack,
+            school_zones_pack,
+            roadkill_pack,
+        ) = await asyncio.gather(
+            _safe(traffic.poll(bbox=corridor_bbox), "traffic"),
+            _safe(hazards.poll(bbox=corridor_bbox), "hazards"),
+            _safe(_maybe_weather(), "weather"),
+            _safe(_maybe_coverage(), "coverage"),
+            _safe(fuel.along_route(polyline6=req.geometry), "fuel"),
+            _safe(_maybe_flood(), "flood"),
+            _safe(_maybe_wildlife(), "wildlife"),
+            _safe(rest_areas.along_route(polyline6=req.geometry), "rest_areas"),
+            _safe(emergency_svc.along_route(polyline6=req.geometry), "emergency"),
+            _safe(heritage_svc.along_route(polyline6=req.geometry), "heritage"),
+            _safe(air_quality_svc.along_route(polyline6=req.geometry), "air_quality"),
+            _safe(bushfire_svc.along_route(polyline6=req.geometry), "bushfire"),
+            _safe(speed_cameras_svc.along_route(polyline6=req.geometry), "speed_cameras"),
+            _safe(toilets_svc.along_route(polyline6=req.geometry), "toilets"),
+            _safe(school_zones_svc.along_route(polyline6=req.geometry), "school_zones"),
+            _safe(roadkill_svc.along_route(polyline6=req.geometry), "roadkill"),
         )
-        # Generate a stable key from route_key so the score can be cached and retrieved.
-        score_key = "score_" + hashlib.sha1(req.route_key.encode()).hexdigest()[:16]
-        from app.core.settings import settings as _s
 
-        put_score_pack(
-            bundle.conn,
-            score_key=score_key,
-            created_at=utc_now_iso(),
-            algo_version=getattr(_s, "score_algo_version", "1"),
-            pack=score_result.model_dump(),
-        )
-        score_pack = score_result
-    except Exception as exc:
-        logger.warning("route_score compute failed (non-fatal): %s", exc)
+        # Route intelligence score - synchronous, uses the overlay results above.
+        try:
+            score_result = route_score.compute(
+                weather=wpack,
+                fuel=fuel_pack,
+                flood=flood_pack,
+                rest=rest_pack,
+                coverage=cov_pack,
+                wildlife=wildlife_pack,
+                traffic=tpack,
+                hazards=hpack,
+            )
+            # Stable key from route_key so the score caches + retrieves.
+            score_key = "score_" + hashlib.sha1(req.route_key.encode()).hexdigest()[:16]
+            from app.core.settings import settings as _s
+
+            put_score_pack(
+                bundle.conn,
+                score_key=score_key,
+                created_at=utc_now_iso(),
+                algo_version=getattr(_s, "score_algo_version", "1"),
+                pack=score_result.model_dump(),
+            )
+            score_pack = score_result
+        except Exception as exc:
+            logger.warning("route_score compute failed (non-fatal): %s", exc)
 
     # 4) Manifest
     return bundle.build_manifest(
@@ -520,13 +542,21 @@ def get_bundle(
 )
 def download_bundle(
     plan_id: str,
+    tier: str = "full",
     bundle: Bundle = Depends(get_bundle_service),
 ) -> StreamingResponse:
-    z = bundle.build_zip(plan_id=plan_id)
+    # tier="nav" returns the small navigate-now zip (manifest + navpack +
+    # corridor + corridor-tiles + places); tier="full" (default) returns the
+    # complete bundle with all richness overlays. The client downloads "nav"
+    # first to become offline-navigable immediately, then "full" in the
+    # background. iOS unpack is idempotent + subset-tolerant, so the full zip
+    # merges the overlays onto the already-unpacked nav packs.
+    nav_only = tier == "nav"
+    z = bundle.build_zip(plan_id=plan_id, nav_only=nav_only)
     return StreamingResponse(
         io.BytesIO(z.zip_bytes),
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="roam_bundle_{plan_id}.zip"'
+            "Content-Disposition": f'attachment; filename="roam_bundle_{plan_id}_{tier}.zip"'
         },
     )
