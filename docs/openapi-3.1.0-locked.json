@@ -447,6 +447,11 @@
             ],
             "title": "Max Edges"
           },
+          "nav_only": {
+            "default": false,
+            "title": "Nav Only",
+            "type": "boolean"
+          },
           "plan_id": {
             "title": "Plan Id",
             "type": "string"
@@ -8305,6 +8310,16 @@
             "required": true,
             "schema": {
               "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "title": "Tier",
               "type": "string"
             }
           }
