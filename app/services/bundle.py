@@ -270,16 +270,17 @@ class Bundle:
         # Single bulk fetch of all raw blobs.
         raw_blobs = bulk_pack_raw(self.conn, overlay_keys)
 
-        # Corridor (offline-reroute graph) is required for the full tier but
-        # OPTIONAL for the nav tier: a phase-1 nav build skips the ~100s cold
-        # corridor build, and the client navigates the planned route from the nav
-        # pack alone (it falls back to the cached primary route when no corridor
-        # index is present). The corridor lands in the later full-tier download.
+        # Corridor (offline-reroute graph) is ALWAYS optional - never 404 on its
+        # absence, for either tier. The nav tier skips the ~100s cold corridor
+        # build by design. The full tier must ALSO tolerate a missing corridor:
+        # corridor.ensure degrades gracefully on a cold OSRM build (the manifest
+        # then carries corridor_status=missing while the overlays still build),
+        # so hard-requiring corridor here meant a cold-build failure 404'd the
+        # WHOLE full download and the user never got the overlays that DID build.
+        # The nav pack is the only hard requirement (enforced above); the planned
+        # route navigates from it, and offline reroute simply waits for a later
+        # build where the corridor comes up warm. Write corridor only if present.
         b_corr = raw_blobs.get("corridor")
-        if not b_corr and not nav_only:
-            if not manifest.corridor_key:
-                not_found("corridor_missing", "manifest has no corridor_key")
-            not_found("corridor_missing", f"no corridor cached for corridor_key {manifest.corridor_key}")
 
         # Log cache misses for optional overlays.
         for pack_type, key in overlay_keys.items():
