@@ -15,6 +15,7 @@ Failure modes caught:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -38,11 +39,37 @@ os.environ.setdefault("OSRM_BASE_URL", "http://osrm.invalid")
 os.environ.setdefault("MAPBOX_TOKEN", "test")
 
 
+LOCKED_SPEC = BACKEND_DIR / "docs" / "openapi-3.1.0-locked.json"
+
+
 @pytest.fixture(scope="module")
 def openapi_spec() -> dict:
     from app.main import app
 
     return app.openapi()
+
+
+def test_locked_baseline_matches_generated_spec(openapi_spec: dict) -> None:
+    """The committed lockfile MUST equal the freshly generated spec.
+
+    CI re-derives openapi.json and `diff -q`s it against
+    docs/openapi-3.1.0-locked.json (the "Verify locked baseline still matches"
+    step in ci.yml). That step only runs when a push touches app/tests/
+    requirements, so a route or model change that lands without regenerating
+    the lockfile is caught late. Mirroring the check here turns lockfile drift
+    into a fast pytest failure. When a route or model legitimately changes the
+    spec, regenerate the lockfile:
+
+        python -c "import json; from app.main import app; \\
+          print(json.dumps(app.openapi(), indent=2, sort_keys=True))" \\
+          > docs/openapi-3.1.0-locked.json
+    """
+    assert LOCKED_SPEC.exists(), f"missing lockfile: {LOCKED_SPEC}"
+    locked = json.loads(LOCKED_SPEC.read_text())
+    assert locked == openapi_spec, (
+        "docs/openapi-3.1.0-locked.json drifted from app.openapi(); "
+        "regenerate the lockfile (see this test's docstring)"
+    )
 
 
 def test_openapi_version_locked_at_3_1_0(openapi_spec: dict) -> None:
