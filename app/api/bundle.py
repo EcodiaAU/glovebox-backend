@@ -253,25 +253,34 @@ async def build_bundle(
     # build fails, ship the bundle WITHOUT the offline-reroute corridor (route
     # spine + places + overlays still ship) rather than 500. It builds warm on the
     # next attempt; corridor_ready in the manifest tells the client.
-    logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
     cmeta = None
     cpack = None
-    try:
-        ensure_result = corridor.ensure(
-            route_key=req.route_key,
-            route_polyline6=req.geometry,
-            profile=profile,
-            buffer_m=buffer_m,
-            max_edges=max_edges,
-            stop_coords=stop_coords,
-        )
-        cmeta = ensure_result.meta
-        cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
-    except Exception as exc:
-        logger.warning(
-            "bundle corridor.ensure failed (non-fatal; bundle ships without corridor): %s",
-            exc,
-        )
+    # The corridor graph is the offline-REROUTE structure, built by OSRM tree-
+    # routing - a COLD build (OSRM + roam-backend scaling from zero) is the single
+    # biggest first-trip cost (~100s observed). Navigation of the PLANNED route
+    # does not need it: the nav pack already carries that route's turn-by-turn and
+    # the client falls back to it (NavService returns the cached navpack primary
+    # when no corridor index is present). So a nav-only (phase-1) build SKIPS the
+    # corridor build entirely - it is fetched by the later full build for offline
+    # reroute. This is what makes "create route -> download -> navigate" near-instant.
+    if not req.nav_only:
+        logger.info(">>> BUNDLE corridor.ensure with %d stop_coords", len(stop_coords))
+        try:
+            ensure_result = corridor.ensure(
+                route_key=req.route_key,
+                route_polyline6=req.geometry,
+                profile=profile,
+                buffer_m=buffer_m,
+                max_edges=max_edges,
+                stop_coords=stop_coords,
+            )
+            cmeta = ensure_result.meta
+            cpack = ensure_result.pack or corridor.get(cmeta.corridor_key)
+        except Exception as exc:
+            logger.warning(
+                "bundle corridor.ensure failed (non-fatal; bundle ships without corridor): %s",
+                exc,
+            )
 
     # Bbox for the bbox-keyed overlays + corridor tiles. Prefer the corridor pack's
     # bbox; if the corridor build failed, derive it from the route geometry so the
