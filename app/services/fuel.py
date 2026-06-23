@@ -112,6 +112,12 @@ _nsw_log = logging.getLogger(__name__)
 # Module-level token cache - simple, sufficient for a single-process server.
 _nsw_token_cache: Dict[str, Any] = {"token": None, "expires_at": 0.0}
 
+# Module-level cache of the full NSW current-prices payload. /prices returns
+# ~3300 stations / 1.8MB; prices move slowly, so a short TTL avoids re-pulling
+# the whole dump on every route bundle build.
+_nsw_prices_cache: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
+_NSW_PRICES_TTL = 300.0  # seconds
+
 
 async def _nsw_get_bearer_token(client: httpx.AsyncClient, warnings: List[str]) -> Optional[str]:
     """Obtain an OAuth2 Bearer token from the OneGov gateway, with simple caching."""
@@ -179,176 +185,121 @@ async def _fetch_nsw_fuel(
     """
     Fetch NSW FuelCheck V2 data via the OneGov gateway.
 
-    Strategy:
-    1. Obtain a Bearer token (cached).
-    2. POST /FuelPriceCheck/v2/fuel/prices/nearby with centre + radius.
-    3. If that fails, GET /FuelPriceCheck/v2/fuel/prices/new + bbox filter.
+    Strategy: GET /FuelPriceCheck/v2/fuel/prices (all current NSW prices),
+    cached briefly, then filter to the bbox. The /prices/nearby POST needs a
+    single concrete fueltype - the group code "All" is rejected (E0002) and the
+    response only carries that one fuel's prices, so the all-current dump is
+    both richer (every fuel type per station) and faster. The token is fetched
+    lazily on a cache miss.
     """
     if not settings.nsw_fuel_enabled or not settings.nsw_fuel_api_key or not settings.nsw_fuel_api_secret:
         return [], {}
 
-    token = await _nsw_get_bearer_token(client, warnings)
-    if not token:
-        return [], {}
-
     base = settings.nsw_fuel_base_url.rstrip("/")
-    hdrs = _nsw_api_headers(token)
 
-    centre_lat = (bbox.minLat + bbox.maxLat) / 2
-    centre_lng = (bbox.minLng + bbox.maxLng) / 2
-    half_diag = haversine_km((bbox.minLat, bbox.minLng), (bbox.maxLat, bbox.maxLng)) / 2
-    radius_km = max(5.0, min(half_diag * 1.1, 100.0))
-
-    stations: List[FuelStation] = []
-    raw_by_id: Dict[str, Any] = {}
-
-    # Try nearby (POST with JSON body)
-    try:
-        resp = await client.post(
-            f"{base}/FuelPriceCheck/v2/fuel/prices/nearby",
-            headers=hdrs,
-            json={
-                "fueltype": "All",
-                "latitude": str(centre_lat),
-                "longitude": str(centre_lng),
-                "radius": str(int(radius_km)),
-                "sortby": "Price",
-                "sortascending": "true",
-            },
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            stations, raw_by_id = _parse_nsw_bylocation(data, bbox=bbox)
-            return stations, raw_by_id
-        else:
-            warnings.append(f"nsw_fuel nearby HTTP {resp.status_code}: {resp.text[:160]}")
-    except Exception as e:
-        warnings.append(f"nsw_fuel nearby error: {e}, falling back to /prices/new")
-
-    # Fallback: GET all new prices + filter by bbox
-    try:
-        hdrs2 = _nsw_api_headers(token)  # fresh transactionid
-        resp = await client.get(f"{base}/FuelPriceCheck/v2/fuel/prices/new", headers=hdrs2)
-        if resp.status_code != 200:
-            warnings.append(f"nsw_fuel prices/new HTTP {resp.status_code}")
+    now = time.time()
+    data = _nsw_prices_cache["data"]
+    if data is None or now >= _nsw_prices_cache["fetched_at"] + _NSW_PRICES_TTL:
+        token = await _nsw_get_bearer_token(client, warnings)
+        if not token:
             return [], {}
-        data = resp.json()
-        # /prices/new returns {"stations": [...], "prices": [...]}
-        station_list = data.get("stations", [])
-        price_list = data.get("prices", [])
-        stations, raw_by_id = _parse_nsw_fallback(station_list, price_list, bbox=bbox)
-        warnings.append(
-            f"nsw_fuel prices/new raw stations={len(station_list)} prices={len(price_list)} "
-            f"parsed_in_bbox={len(stations)}"
-        )
-    except Exception as e:
-        warnings.append(f"nsw_fuel prices/new error: {e}")
+        try:
+            resp = await client.get(
+                f"{base}/FuelPriceCheck/v2/fuel/prices",
+                headers=_nsw_api_headers(token),
+                timeout=60.0,
+            )
+        except Exception as e:
+            warnings.append(f"nsw_fuel prices error: {e}")
+            return [], {}
+        if resp.status_code != 200:
+            warnings.append(f"nsw_fuel prices HTTP {resp.status_code}")
+            return [], {}
+        if not resp.text.strip():
+            warnings.append("nsw_fuel prices empty 200 body")
+            return [], {}
+        try:
+            data = resp.json()
+        except Exception as e:
+            warnings.append(f"nsw_fuel prices JSON error: {e}")
+            return [], {}
+        _nsw_prices_cache["data"] = data
+        _nsw_prices_cache["fetched_at"] = now
 
-    return stations, raw_by_id
-
-
-def _parse_nsw_bylocation(
-    data: Dict[str, Any],
-    *,
-    bbox: BBox4,
-) -> Tuple[List[FuelStation], Dict[str, Any]]:
-    """Parse /bylocation response into FuelStation list."""
-    stations: List[FuelStation] = []
-    raw_by_id: Dict[str, Any] = {}
-
-    # Response shape: {"stations": [...], "prices": [...]}
-    # Each station: {stationcode, brandid, brand, name, address, location: {latitude, longitude}}
-    # Each price:   {stationcode, fueltype, price, lastupdated}
-    raw_stations = {
-        s["stationcode"]: s
-        for s in data.get("stations", [])
-        if "stationcode" in s
-    }
-    price_map: Dict[str, List[FuelPrice]] = {}
-    for p in data.get("prices", []):
-        code = str(p.get("stationcode", ""))
-        if not code:
-            continue
-        fp = FuelPrice(
-            fuel_type=str(p.get("fueltype", "")),
-            price_cents=float(p.get("price", 0)),
-            last_updated=str(p.get("lastupdated", "")) or None,
-        )
-        price_map.setdefault(code, []).append(fp)
-
-    for code, s in raw_stations.items():
-        loc = s.get("location") or {}
-        lat = float(loc.get("latitude", 0))
-        lng = float(loc.get("longitude", 0))
-        if lat == 0 and lng == 0:
-            continue
-        # Filter to bbox
-        if not (bbox.minLat <= lat <= bbox.maxLat and bbox.minLng <= lng <= bbox.maxLng):
-            continue
-
-        station = FuelStation(
-            id=f"nsw_fc_{code}",
-            source="nsw_fuelcheck",
-            name=str(s.get("name", "")),
-            brand=str(s.get("brand", "")) or None,
-            lat=lat,
-            lng=lng,
-            address=str(s.get("address", "")) or None,
-            fuel_types=price_map.get(code, []),
-        )
-        stations.append(station)
-        raw_by_id[f"nsw_fc_{code}"] = s
-
-    return stations, raw_by_id
+    return _parse_nsw_prices(
+        data.get("stations", []), data.get("prices", []), bbox=bbox
+    )
 
 
-def _parse_nsw_fallback(
+def _parse_nsw_prices(
     station_list: List[Dict[str, Any]],
     price_list: List[Dict[str, Any]],
     *,
     bbox: BBox4,
 ) -> Tuple[List[FuelStation], Dict[str, Any]]:
-    """Parse /stations + /prices/new fallback response."""
-    raw_stations = {
-        str(s.get("code", s.get("stationcode", ""))): s
-        for s in station_list
-        if s.get("code") or s.get("stationcode")
-    }
+    """
+    Parse a FuelCheck V2 {stations, prices} payload into in-bbox FuelStations.
+
+    Shape (verified live 2026-06-23):
+      station: {brandid, stationid, brand, code, name, address,
+                location: {latitude, longitude}, state}
+      price:   {stationcode, fueltype, price, priceunit, lastupdated, state}
+
+    The station join key is `code` and the price join key is `stationcode`;
+    both arrive as int (/nearby) or str (/prices), so both are normalised to
+    str. Lat/lng live under the nested `location` object, never at top level -
+    the old top-level read was why the fallback parsed to 0 in-bbox stations.
+    """
+    raw_stations: Dict[str, Dict[str, Any]] = {}
+    for s in station_list:
+        code = s.get("code", s.get("stationcode"))
+        if code is None or code == "":
+            continue
+        raw_stations[str(code)] = s
+
     price_map: Dict[str, List[FuelPrice]] = {}
     for p in price_list:
-        code = str(p.get("stationcode", p.get("code", "")))
-        if not code:
+        code = p.get("stationcode", p.get("code"))
+        if code is None or code == "":
             continue
-        fp = FuelPrice(
-            fuel_type=str(p.get("fueltype", p.get("FuelType", ""))),
-            price_cents=float(p.get("price", p.get("Price", 0))),
-            last_updated=str(p.get("lastupdated", p.get("LastUpdated", ""))) or None,
+        price_map.setdefault(str(code), []).append(
+            FuelPrice(
+                fuel_type=str(p.get("fueltype", "")),
+                price_cents=float(p.get("price", 0) or 0),
+                last_updated=str(p.get("lastupdated", "")) or None,
+            )
         )
-        price_map.setdefault(code, []).append(fp)
 
     stations: List[FuelStation] = []
     raw_by_id: Dict[str, Any] = {}
     for code, s in raw_stations.items():
-        lat_raw = s.get("latitude", s.get("Latitude"))
-        lng_raw = s.get("longitude", s.get("Longitude"))
+        loc = s.get("location") or {}
+        lat_raw = loc.get("latitude")
+        lng_raw = loc.get("longitude")
         if lat_raw is None or lng_raw is None:
             continue
         lat = float(lat_raw)
         lng = float(lng_raw)
+        if lat == 0 and lng == 0:
+            continue
         if not (bbox.minLat <= lat <= bbox.maxLat and bbox.minLng <= lng <= bbox.maxLng):
             continue
+        prices = price_map.get(code, [])
+        if not prices:
+            continue  # station with no current price is not useful on the overlay
 
-        station = FuelStation(
-            id=f"nsw_fc_{code}",
-            source="nsw_fuelcheck",
-            name=str(s.get("name", s.get("Name", ""))),
-            brand=str(s.get("brand", s.get("Brand", ""))) or None,
-            lat=lat,
-            lng=lng,
-            address=str(s.get("address", s.get("Address", ""))) or None,
-            fuel_types=price_map.get(code, []),
+        stations.append(
+            FuelStation(
+                id=f"nsw_fc_{code}",
+                source="nsw_fuelcheck",
+                name=str(s.get("name", "")),
+                brand=str(s.get("brand", "")) or None,
+                lat=lat,
+                lng=lng,
+                address=str(s.get("address", "")) or None,
+                fuel_types=prices,
+            )
         )
-        stations.append(station)
         raw_by_id[f"nsw_fc_{code}"] = s
 
     return stations, raw_by_id
