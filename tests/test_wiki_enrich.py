@@ -80,6 +80,47 @@ def test_no_wiki_ref_skipped(monkeypatch):
     assert "description" not in items[0].extra
 
 
+def test_p18_fallback_when_summary_has_no_thumb(monkeypatch):
+    # Summary returns an extract + qid but NO image; entity P18 supplies the image.
+    monkeypatch.setattr(W, "_wikipedia_summary",
+                        lambda c, lang, title: {"title": title, "extract": "blurb",
+                                                "image_url": None, "source_url": "u", "qid": "Q42"})
+    monkeypatch.setattr(W, "_wikidata_entity",
+                        lambda c, qid: {"image_url": "https://commons/p18.jpg"})
+    got = W._fetch_one("wp:en:SomeTown")
+    assert got["extract"] == "blurb"
+    assert got["image_url"] == "https://commons/p18.jpg"  # filled from P18
+
+
+def test_summary_thumb_wins_over_p18(monkeypatch):
+    monkeypatch.setattr(W, "_wikipedia_summary",
+                        lambda c, lang, title: {"title": title, "extract": "b",
+                                                "image_url": "https://summary/thumb.jpg",
+                                                "source_url": "u", "qid": "Q42"})
+    # _wikidata_entity must NOT even be consulted when the summary has a thumb;
+    # guard that by making it raise if called.
+    def _boom(c, qid):
+        raise AssertionError("P18 should not be fetched when summary has a thumb")
+    monkeypatch.setattr(W, "_wikidata_entity", _boom)
+    got = W._fetch_one("wp:en:Town")
+    assert got["image_url"] == "https://summary/thumb.jpg"
+
+
+def test_qid_only_entity_image_no_wikipedia(monkeypatch):
+    # A Q-id with a P18 image but no usable Wikipedia page still yields an image.
+    monkeypatch.setattr(W, "_wikidata_entity",
+                        lambda c, qid: {"image_url": "https://commons/only.jpg"})
+    monkeypatch.setattr(W, "_wikipedia_summary", lambda c, lang, title: None)
+    got = W._fetch_one("Q123")
+    assert got == {"image_url": "https://commons/only.jpg"}
+
+
+def test_commons_thumb_encodes_filename():
+    url = W._commons_thumb("Coober Pedy - pano.jpg")
+    assert "Special:FilePath/Coober_Pedy_-_pano.jpg" in url
+    assert "width=" in url
+
+
 def test_empty_result_cached_no_crash(monkeypatch):
     monkeypatch.setattr(W, "_fetch_one", lambda k: {})
     conn = _conn()

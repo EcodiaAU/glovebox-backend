@@ -82,8 +82,15 @@ def _needs_enrich(item: Any) -> bool:
     return not (has_desc and has_thumb)
 
 
+def _commons_thumb(filename: str) -> str:
+    """Commons Special:FilePath resolves a FILENAME (not an entity) to the image,
+    with ?width for a thumbnail. This is the correct FilePath usage."""
+    enc = quote(filename.replace(" ", "_"), safe="")
+    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{enc}?width={_THUMB_W}"
+
+
 def _wikipedia_summary(client: httpx.Client, lang: str, title: str) -> Optional[dict]:
-    """Wikipedia REST summary: extract + thumbnail in one call."""
+    """Wikipedia REST summary: extract + thumbnail (+ the Wikidata Q-id) in one call."""
     enc = quote(title.replace(" ", "_"), safe="")
     url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{enc}"
     r = client.get(url, timeout=_FETCH_TIMEOUT, follow_redirects=True)
@@ -102,37 +109,64 @@ def _wikipedia_summary(client: httpx.Client, lang: str, title: str) -> Optional[
         "extract": extract[:600] if extract else None,
         "image_url": thumb,
         "source_url": page,
+        "qid": d.get("wikibase_item"),
     }
 
 
-def _resolve_qid_to_enwiki(client: httpx.Client, qid: str) -> Optional[tuple[str, str]]:
-    """Q-id -> (lang, title) of its best Wikipedia sitelink (prefer en, then any)."""
+def _wikidata_entity(client: httpx.Client, qid: str) -> dict:
+    """One EntityData fetch -> best Wikipedia sitelink (lang, title) + P18 image
+    Commons thumb. Returns {} on miss. P18 is the fallback image for POIs whose
+    Wikipedia summary has no lead photo (common for small towns + landmarks)."""
     url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
     r = client.get(url, timeout=_FETCH_TIMEOUT, follow_redirects=True)
     if r.status_code != 200:
-        return None
+        return {}
     ent = (r.json().get("entities") or {}).get(qid) or {}
+    out: dict = {}
     sitelinks = ent.get("sitelinks") or {}
+    site = None
     for key in ("enwiki", "simplewiki"):
-        if key in sitelinks and sitelinks[key].get("title"):
-            return ("en", sitelinks[key]["title"])
-    # any *wiki sitelink (skip commons/specieswiki/meta)
-    for sk, sv in sitelinks.items():
-        if sk.endswith("wiki") and sv.get("title") and sk not in ("commonswiki", "specieswiki", "metawiki"):
-            return (sk[:-4], sv["title"])
-    return None
+        if sitelinks.get(key, {}).get("title"):
+            site = ("en", sitelinks[key]["title"]); break
+    if not site:
+        for sk, sv in sitelinks.items():
+            if sk.endswith("wiki") and sv.get("title") and sk not in ("commonswiki", "specieswiki", "metawiki"):
+                site = (sk[:-4], sv["title"]); break
+    if site:
+        out["sitelink"] = site
+    try:
+        p18 = ent.get("claims", {}).get("P18")
+        if p18:
+            out["image_url"] = _commons_thumb(p18[0]["mainsnak"]["datavalue"]["value"])
+    except (KeyError, IndexError, TypeError):
+        pass
+    return out
 
 
 def _fetch_one(key: str) -> dict:
-    """Fetch enrichment for a single cache key. Returns a (possibly empty) dict."""
+    """Fetch enrichment for a single cache key. Returns a (possibly empty) dict.
+    Image priority: Wikipedia summary thumbnail, then Wikidata P18."""
     try:
         with httpx.Client(headers={"User-Agent": _UA}) as client:
             if key.startswith("wp:"):
                 _, lang, title = key.split(":", 2)
-                got = _wikipedia_summary(client, lang, title)
-            else:  # Q-id
-                resolved = _resolve_qid_to_enwiki(client, key)
-                got = _wikipedia_summary(client, *resolved) if resolved else None
+                got = _wikipedia_summary(client, lang, title) or {}
+                # If the summary has no lead image, fall back to the entity's P18.
+                if got and not got.get("image_url") and got.get("qid"):
+                    ent = _wikidata_entity(client, got["qid"])
+                    if ent.get("image_url"):
+                        got["image_url"] = ent["image_url"]
+            else:  # Q-id key
+                ent = _wikidata_entity(client, key)
+                got = {}
+                if ent.get("sitelink"):
+                    got = _wikipedia_summary(client, *ent["sitelink"]) or {}
+                # Summary thumb wins; otherwise the entity's P18.
+                if got and not got.get("image_url") and ent.get("image_url"):
+                    got["image_url"] = ent["image_url"]
+                # Extract-less entity (no usable Wikipedia page) can still yield an image.
+                if not got and ent.get("image_url"):
+                    got = {"image_url": ent["image_url"]}
             return got or {}
     except Exception as exc:  # best-effort; never raise into the bundle path
         logger.debug("wiki_enrich fetch failed for %s: %s", key, exc)
