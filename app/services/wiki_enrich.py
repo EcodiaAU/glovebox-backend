@@ -290,6 +290,16 @@ def enrich_items(items: list[Any], conn) -> int:
                 if data.get("source_url"):
                     extra["wiki_source"] = data["source_url"]
                 enriched += 1
+
+    # Final safety pass over EVERY item: a dead legacy thumbnail (wptype=entity)
+    # is worse than none (the client tries to load it and fails), so strip any
+    # that survived - including items whose enrichment found no replacement image,
+    # and items sourced from the Supabase cache that still carry the old URL.
+    for it in items:
+        ex = getattr(it, "extra", None)
+        if ex and _is_broken_thumb(ex.get("thumbnail_url")):
+            ex.pop("thumbnail_url", None)
+
     if enriched:
         logger.info("wiki_enrich: enriched %d POIs (%d cold fetches)", enriched, len(misses))
     return enriched

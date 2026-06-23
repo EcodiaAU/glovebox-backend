@@ -129,6 +129,19 @@ def test_broken_wptype_entity_thumb_is_replaced(monkeypatch):
     assert items[0].extra["thumbnail_url"] == "https://good/img.jpg"  # replaced
 
 
+def test_broken_thumb_stripped_when_no_replacement(monkeypatch):
+    # Enrichment yields a description but NO image; the broken legacy thumbnail
+    # must be stripped entirely (a dead URL is worse than none), not left.
+    monkeypatch.setattr(W, "_fetch_one",
+                        lambda k: {"extract": "blurb", "image_url": None, "source_url": "u"})
+    conn = _conn()
+    broken = "https://commons.wikimedia.org/wiki/Special:FilePath/?width=400&wptype=entity&wpvalue=Q9"
+    items = [_item({"name": "Stirling North", "wikidata": "Q9", "thumbnail_url": broken})]
+    W.enrich_items(items, conn)
+    assert items[0].extra.get("thumbnail_url") is None  # broken URL removed
+    assert "blurb" in items[0].extra["description"]
+
+
 def test_commons_thumb_encodes_filename():
     url = W._commons_thumb("Coober Pedy - pano.jpg")
     assert "Special:FilePath/Coober_Pedy_-_pano.jpg" in url
