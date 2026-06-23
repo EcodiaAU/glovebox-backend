@@ -221,7 +221,7 @@ async def _fetch_nsw_fuel(
             stations, raw_by_id = _parse_nsw_bylocation(data, bbox=bbox)
             return stations, raw_by_id
         else:
-            warnings.append(f"nsw_fuel nearby HTTP {resp.status_code}, falling back to /prices/new")
+            warnings.append(f"nsw_fuel nearby HTTP {resp.status_code}: {resp.text[:160]}")
     except Exception as e:
         warnings.append(f"nsw_fuel nearby error: {e}, falling back to /prices/new")
 
@@ -237,6 +237,10 @@ async def _fetch_nsw_fuel(
         station_list = data.get("stations", [])
         price_list = data.get("prices", [])
         stations, raw_by_id = _parse_nsw_fallback(station_list, price_list, bbox=bbox)
+        warnings.append(
+            f"nsw_fuel prices/new raw stations={len(station_list)} prices={len(price_list)} "
+            f"parsed_in_bbox={len(stations)}"
+        )
     except Exception as e:
         warnings.append(f"nsw_fuel prices/new error: {e}")
 
