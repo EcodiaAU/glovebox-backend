@@ -2189,14 +2189,12 @@ def _resolve_thumbnail(tags: Dict[str, Any]) -> Optional[str]:
             # Already a URL - pass through (client will fetch directly)
             return wmc[:500]
 
-    # 2. Wikidata entity → use Special:FilePath (auto-resolves to main image)
-    wd = tags.get("wikidata")
-    if wd and isinstance(wd, str) and wd.startswith("Q"):
-        return (
-            f"https://commons.wikimedia.org/wiki/Special:FilePath/"
-            f"?width={_WIKI_THUMB_WIDTH}&wptype=entity&wpvalue={wd}"
-        )
-
+    # 2. Wikidata entity image is NOT resolvable by a deterministic URL. The old
+    # Special:FilePath?wptype=entity&wpvalue=Q form does NOT resolve (FilePath
+    # takes a filename, not an entity), so it produced a broken thumbnail that
+    # then BLOCKED wiki_enrich from filling a real image (has_thumb was already
+    # truthy). Return None and let wiki_enrich resolve the Q-id's P18 image
+    # properly (it fetches the entity and builds a filename-based FilePath URL).
     return None
 
 

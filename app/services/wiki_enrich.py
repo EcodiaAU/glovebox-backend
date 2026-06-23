@@ -74,11 +74,19 @@ def _fetch_key(item: Any) -> Optional[str]:
     return None
 
 
+def _is_broken_thumb(url: Any) -> bool:
+    """The legacy _resolve_thumbnail Wikidata branch emitted a Special:FilePath
+    ?wptype=entity URL that never resolves. Treat it as no-thumb so enrichment
+    replaces it with a real image (handles any cached pack that still carries it)."""
+    return isinstance(url, str) and "wptype=entity" in url
+
+
 def _needs_enrich(item: Any) -> bool:
-    """True if the item is missing a description or a thumbnail we could fill."""
+    """True if the item is missing a description or a (real) thumbnail we could fill."""
     extra = getattr(item, "extra", None) or {}
     has_desc = bool(extra.get("description"))
-    has_thumb = bool(extra.get("thumbnail_url"))
+    thumb = extra.get("thumbnail_url")
+    has_thumb = bool(thumb) and not _is_broken_thumb(thumb)
     return not (has_desc and has_thumb)
 
 
@@ -273,7 +281,8 @@ def enrich_items(items: list[Any], conn) -> int:
             if data.get("extract") and not extra.get("description"):
                 extra["description"] = data["extract"]
                 changed = True
-            if data.get("image_url") and not extra.get("thumbnail_url"):
+            cur_thumb = extra.get("thumbnail_url")
+            if data.get("image_url") and (not cur_thumb or _is_broken_thumb(cur_thumb)):
                 extra["thumbnail_url"] = data["image_url"]
                 changed = True
             if changed:

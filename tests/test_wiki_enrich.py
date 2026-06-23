@@ -115,6 +115,20 @@ def test_qid_only_entity_image_no_wikipedia(monkeypatch):
     assert got == {"image_url": "https://commons/only.jpg"}
 
 
+def test_broken_wptype_entity_thumb_is_replaced(monkeypatch):
+    # A POI whose thumbnail_url is the legacy broken Special:FilePath?wptype=entity
+    # form must be treated as no-thumb and replaced by a real enriched image.
+    monkeypatch.setattr(W, "_fetch_one",
+                        lambda k: {"extract": "blurb", "image_url": "https://good/img.jpg",
+                                   "source_url": "u"})
+    conn = _conn()
+    broken = "https://commons.wikimedia.org/wiki/Special:FilePath/?width=480&wptype=entity&wpvalue=Q5"
+    items = [_item({"name": "Town", "wikidata": "Q5", "thumbnail_url": broken})]
+    assert W._needs_enrich(items[0]) is True  # broken thumb counts as missing
+    W.enrich_items(items, conn)
+    assert items[0].extra["thumbnail_url"] == "https://good/img.jpg"  # replaced
+
+
 def test_commons_thumb_encodes_filename():
     url = W._commons_thumb("Coober Pedy - pano.jpg")
     assert "Special:FilePath/Coober_Pedy_-_pano.jpg" in url
