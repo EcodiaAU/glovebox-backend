@@ -125,14 +125,25 @@ async def _nsw_get_bearer_token(client: httpx.AsyncClient, warnings: List[str]) 
     auth_header = "Basic " + base64.b64encode(cred.encode()).decode()
 
     try:
+        # grant_type MUST go in the form BODY (application/x-www-form-urlencoded),
+        # not as a query param. The OneGov/Apigee gateway rejects a bodyless POST
+        # with 411 "Content-Length is missing"; httpx then sends Content-Length:0
+        # and the gateway returns an empty 200, so resp.json() threw
+        # "Expecting value: line 1 column 1" and NSW+TAS fuel silently returned 0
+        # stations. Verified against the live endpoint 2026-06-23: query-param
+        # shape -> 411/empty, form-body shape -> 200.
         resp = await client.post(
             url,
-            params={"grant_type": "client_credentials"},
-            headers={"Authorization": auth_header},
+            data={"grant_type": "client_credentials"},
+            headers={"Authorization": auth_header, "Accept": "application/json"},
         )
         if resp.status_code != 200:
             warnings.append(f"nsw_fuel oauth HTTP {resp.status_code}")
             _nsw_log.warning("nsw_fuel oauth token failed: HTTP %s - %s", resp.status_code, resp.text[:200])
+            return None
+        if not resp.text.strip():
+            warnings.append("nsw_fuel oauth empty 200 body")
+            _nsw_log.warning("nsw_fuel oauth empty 200 body (request-shape regression?)")
             return None
         data = resp.json()
         token = data.get("access_token")
