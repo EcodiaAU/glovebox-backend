@@ -111,14 +111,21 @@ def places_search(
 
         limit = min(req.limit or 10, 10)
 
+        # Custom/partner POIs (Locals merchants etc.) matched by name, so a typed
+        # business name finds the Ecosphere-listed business, not just Mapbox places.
+        custom = places.custom_by_name(req.query.strip(), req.bbox, limit)
+
         try:
             mapbox = _get_mapbox(conn=cache_conn)
-            return mapbox.search(
+            pack = mapbox.search(
                 query=req.query.strip(),
                 proximity=proximity,
                 limit=limit,
                 bbox=bbox_tuple,
             )
+            if custom:
+                pack.items = places._merge_front(custom, pack.items)[:limit]
+            return pack
         except RuntimeError as exc:
             logger.error("mapbox_search_failed: %s - falling back to overpass", exc)
 

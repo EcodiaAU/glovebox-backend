@@ -112,6 +112,7 @@ class SupaPlacesRepo:
         bbox: BBox4,
         categories: list[PlaceCategory] | None,
         limit: int,
+        sources: list[str] | None = None,
     ) -> list[PlaceItem]:
         cats = _norm_categories(categories)
         limit = max(1, int(limit))
@@ -129,12 +130,57 @@ class SupaPlacesRepo:
             joined = ",".join(cats)
             params.append(("category", f"in.({joined})"))
 
+        # Restrict to specific provenance sources (e.g. ["locals"]) so callers can
+        # cheaply fetch ONLY custom/partner POIs and always merge them into results.
+        if sources:
+            params.append(("source", f"in.({','.join(sources)})"))
+
         url = f"{self.base}/rest/v1/roam_places_items"
         with httpx.Client(timeout=20.0) as client:
             resp = client.get(url, headers=self._headers(), params=params)  # type: ignore[arg-type]
             resp.raise_for_status()
             rows = resp.json()
 
+        return self._rows_to_items(rows)
+
+    def query_text(
+        self,
+        *,
+        query: str,
+        bbox: BBox4 | None = None,
+        limit: int,
+        sources: list[str] | None = None,
+    ) -> list[PlaceItem]:
+        """Name search over custom/partner POIs (e.g. Locals merchants) so a
+        business is findable by typing its name. ILIKE substring on name, with an
+        optional bbox + source restriction. Best-effort caller handles errors."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        limit = max(1, int(limit))
+        params: list[tuple[str, str]] = [
+            ("select", "osm_type,osm_id,lat,lng,name,category,tags"),
+            ("name", f"ilike.*{q}*"),
+            ("limit", str(limit)),
+        ]
+        if bbox is not None:
+            params += [
+                ("lat", f"gte.{bbox.minLat}"),
+                ("lat", f"lte.{bbox.maxLat}"),
+                ("lng", f"gte.{bbox.minLng}"),
+                ("lng", f"lte.{bbox.maxLng}"),
+            ]
+        if sources:
+            params.append(("source", f"in.({','.join(sources)})"))
+        url = f"{self.base}/rest/v1/roam_places_items"
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.get(url, headers=self._headers(), params=params)  # type: ignore[arg-type]
+            resp.raise_for_status()
+            rows = resp.json()
+        return self._rows_to_items(rows)
+
+    @staticmethod
+    def _rows_to_items(rows: list) -> list[PlaceItem]:
         out: list[PlaceItem] = []
         for r in rows:
             osm_type = r.get("osm_type")
