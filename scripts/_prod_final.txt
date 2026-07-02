@@ -1,0 +1,78 @@
+target: https://roam-backend-176723812810.australia-southeast1.run.app
+
+======================================================================
+CASE: servo_nearest_kawana
+  User in Kawana, NEARBY only has Landsborough (21km) - asks 'nearest servo'. Should trigger places_search.
+  user: "where's the nearest servo?"
+  [PASS] emitted tight places_search around user  (4.1s)
+  done=False  tool_calls=['places_search']
+  assistant (160 chars):
+    > On it — the corridor cache has a BP that's nearly 24km away, which doesn't pass the sniff test when you're sitting in Caloundra. Searching properly right now...
+    tool: places_search req={"center":{"lat":-26.68,"lng":153.137},"radius_m":5000,"categories":["fuel"],"limit":12}
+
+======================================================================
+CASE: servo_nearest_control
+  Control: NEARBY has Kawana fuel at 0.7km - should be named directly without tool_call.
+  user: "where's the nearest servo?"
+  [PASS] correctly named Kawana fuel from NEARBY  (4.4s)
+  done=True  tool_calls=[]
+  assistant (113 chars):
+    > There's a BP at Kawana Waters sitting just 0.8km ahead of you — basically right there. That's your nearest servo.
+
+======================================================================
+CASE: best_fish_and_chips
+  Open-ended local food query - should either name specific spots OR run search, never bluff a promise.
+  user: "what's the best fish and chips around here?"
+  [PASS] ran search  (3.3s)
+  done=False  tool_calls=['places_search']
+  assistant (101 chars):
+    > You're in Caloundra - solid spot for fish and chips! Let me find the best options near you right now.
+    tool: places_search req={"center":{"lat":-26.8,"lng":153.133},"radius_m":3000,"categories":["fast_food","restaurant"],"limit":12}
+  depth questions:
+    ? Did it name actual Caloundra/Sunshine Coast spots?
+    ? Did it suggest Bluewater Bistro, Tides Waterfront, Suttons, etc?
+
+======================================================================
+CASE: glass_house_depth
+  Knowledge depth test: rich place with deep Aboriginal + colonial + geological history.
+  user: "tell me about the Glass House Mountains, what's the story?"
+  [PASS] deep knowledge (10 anchors: ['cook', 'captain cook', 'jinibara', 'kabi kabi', 'trachyte'])  (22.9s)
+  done=True  tool_calls=[]
+  assistant (2375 chars):
+    > Mate, you're practically in their backyard right now — the Glass House Mountains are sitting to your west as you head up toward Caloundra. Absolute icons of the Sunshine Coast hinterland.
+    > 
+    > **The geological story**
+    > 
+    > These peaks are the eroded remnants of ancient volcanoes — but not your classic cone-shaped ones. About 25–27 million years ago, magma pushed up through the earth's crust but never actually erupted. It cooled and hardened underground into super-tough rhyolite and trachyte plugs. Over millions of years, the softer surrounding rock eroded away, leaving these dramatic spires standing proud above the coastal plain. What you're seeing is literally the *inside* of old volcanoes.
+    > 
+    > There are 11 main peaks, the tallest being **Mount Beerwah** at 556m — and she's actually still growing, geologically speaking (very, very slowly). **Mount Tibrogargan** (364m) is the craggy one that looks like a face in profile. **Mount Coonowrin** (377m) is the sharp needle — also called Crookneck.
+    > 
+    > **The Dreaming**
+    > 
+    > For the Jinibara and Kabi Kabi (Gubbi Gubbi) peoples, these mountains aren't just rocks — they're family. In the Dreaming, Tibrogargan is the father, Beerwah the pregnant mother, and the smaller peaks are their children. The story goes that Tibrogargan saw flood waters rising and called on his son Coonowrin to help carry Beerwah to safety. Coonowrin fled instead, and in his anger Tibrogargan struck him so hard it broke his neck — which is why Coonowrin has that crooked top. Tibrogargan now sits facing away from his son in shame. 
+    > 
+    > Genuinely one of the most beautiful Dreaming stories attached to a landscape you'll ever hear.
+    > 
+    > **Captain Cook's take**
+    > 
+    > Cook sailed past in 1770 and named them the Glass House Mountains — supposedly because their shape reminded him of the glass cone furnaces common in Yorkshire where he grew up. A long way from home to be reminded of a factory, but there you go.
+    > 
+    > **What you can do there**
+    > 
+    > Most peaks are climbable — Ngungun (253m) is the most popular and accessible, with brilliant 360° views back toward the coast and up to the Sunshine Coast. Beerwah and Tibrogargan are serious scrambles, not casual walks. Coonowrin is actually closed to climbing to protect its integrity.
+    > 
+    > You're about 20–25km west of them right now. Worth a detour if you haven't been up Ngungun — it's a cracker on a clear afternoon like today.
+  depth questions:
+    ? Did it mention the Dreamtime story (Tibrogargan as the father)?
+    ? Did it mention Cook naming them in 1770 (looked like glass furnaces)?
+    ? Did it mention which peaks are climbable (Ngungun yes, Beerwah closed)?
+
+======================================================================
+CASE: obscure_current_info
+  Current-info query (hours, EFTPOS) - must search or admit uncertainty, not bluff.
+  user: 'is the Mary Cairncross Scenic Reserve cafe open today, and do they take cards?'
+  [PASS] ran inline web_search (grounded, 5 sources)  (5.4s)
+  done=False  tool_calls=['places_search']
+  assistant (54 chars):
+    > Good question - let me pull up their current info now.
+    tool: places_search req={"center":{"lat":-26.79,"lng":152.87},"radius_m":5000,"categories":["cafe"],"limit":5}

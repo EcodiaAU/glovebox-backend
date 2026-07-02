@@ -3247,12 +3247,65 @@ class Places:
     # Original bbox-based search (unchanged)
     # ──────────────────────────────────────────────────────────
 
+    def _custom_pois(self, bbox: BBox4 | None, cats: list, limit: int) -> List[PlaceItem]:
+        """Custom / partner POIs (e.g. Locals merchants, source='locals') in the
+        bbox. These are always merged into search results, front-ranked, so a
+        business listed via Ecosphere is findable even where OSM is dense or a
+        pack is already cached. Best-effort: never raises."""
+        if bbox is None or self.supa is None:
+            return []
+        sources = list(getattr(settings, "places_custom_sources", ["locals"]))
+        if not sources:
+            return []
+        try:
+            return self.supa.query_bbox(bbox=bbox, categories=cats, limit=min(int(limit), 100), sources=sources)
+        except Exception as e:
+            logger.warning("custom POI fetch FAILED: %r", e)
+            return []
+
+    def custom_by_name(self, query: str, bbox: BBox4 | None, limit: int) -> List[PlaceItem]:
+        """Name match over custom/partner POIs (Locals merchants etc.) so a text
+        search for the business name finds it. Best-effort: never raises."""
+        if self.supa is None:
+            return []
+        sources = list(getattr(settings, "places_custom_sources", ["locals"]))
+        if not sources:
+            return []
+        try:
+            return self.supa.query_text(query=query, bbox=bbox, limit=min(int(limit), 25), sources=sources)
+        except Exception as e:
+            logger.warning("custom POI name search FAILED: %r", e)
+            return []
+
+    @staticmethod
+    def _merge_front(custom: List[PlaceItem], base: List[PlaceItem]) -> List[PlaceItem]:
+        """Prepend custom POIs to base, de-duplicated by id (custom wins)."""
+        out: List[PlaceItem] = []
+        seen: set[str] = set()
+        for it in [*custom, *base]:
+            if it.id in seen:
+                continue
+            seen.add(it.id)
+            out.append(it)
+        return out
+
     def search(self, req: PlacesRequest) -> PlacesPack:
         pkey = places_key(req.model_dump(), self.algo_version)
+
+        bbox = _bbox_from_req(req)
+        limit = int(req.limit or 50)
+        limit = max(1, min(limit, int(getattr(settings, "places_hard_cap", 12000))))
+        cats = req.categories or []
+
+        # Always-include custom/partner POIs (Locals merchants etc.) so they are
+        # findable regardless of OSM density or a cached pack.
+        custom_items = self._custom_pois(bbox, cats, limit)
 
         cached = get_places_pack(self.cache_conn, pkey)
         if cached:
             pack = PlacesPack.model_validate(cached)
+            if custom_items:
+                pack.items = self._merge_front(custom_items, pack.items)[:limit]
 
             migrate_cached = bool(getattr(settings, "supa_places_publish_cached_packs", True))
             if migrate_cached and self.supa is not None and pack.items and ("supa" not in (pack.provider or "")):
@@ -3262,7 +3315,6 @@ class Places:
 
             return pack
 
-        bbox = _bbox_from_req(req)
         if not bbox:
             pack = PlacesPack(
                 places_key=pkey,
@@ -3274,15 +3326,12 @@ class Places:
             )
             return self._finalize_and_cache_pack(pack, publish_to_supa=False)
 
-        limit = int(req.limit or 50)
-        limit = max(1, min(limit, int(getattr(settings, "places_hard_cap", 12000))))
-        cats = req.categories or []
-
         min_ratio = float(getattr(settings, "places_local_satisfy_ratio", 0.70))
         need_count = max(1, int(limit * min_ratio))
 
-        items: List[PlaceItem] = []
-        seen_ids: set[str] = set()
+        # Seed with custom POIs so they always appear and rank first.
+        items: List[PlaceItem] = list(custom_items)
+        seen_ids: set[str] = {it.id for it in items}
 
         # 1) local store
         try:

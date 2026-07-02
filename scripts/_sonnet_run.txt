@@ -1,0 +1,70 @@
+target: http://127.0.0.1:8000
+
+======================================================================
+CASE: servo_nearest_kawana
+  User in Kawana, NEARBY only has Landsborough (21km) - asks 'nearest servo'. Should trigger places_search.
+  user: "where's the nearest servo?"
+  [PASS] emitted tight places_search around user  (5.7s)
+  done=False  tool_calls=['places_search']
+  assistant (104 chars):
+    > On it - the corridor cache has nothing close, so I'm doing a proper search around your current position.
+    tool: places_search req={"center":{"lat":-26.68,"lng":153.137},"radius_m":8000,"categories":["fuel"],"limit":12}
+
+======================================================================
+CASE: servo_nearest_control
+  Control: NEARBY has Kawana fuel at 0.7km - should be named directly without tool_call.
+  user: "where's the nearest servo?"
+  [PASS] correctly named Kawana fuel from NEARBY  (5.6s)
+  done=True  tool_calls=[]
+  assistant (110 chars):
+    > There's a BP at Kawana Waters sitting just 0.8km ahead of you — basically right there. No need to hunt around.
+
+======================================================================
+CASE: best_fish_and_chips
+  Open-ended local food query - should either name specific spots OR run search, never bluff a promise.
+  user: "what's the best fish and chips around here?"
+  [PASS] ran search  (4.9s)
+  done=False  tool_calls=['places_search']
+  assistant (101 chars):
+    > You're in Caloundra - solid spot for fish and chips! Let me find the best options near you right now.
+    tool: places_search req={"center":{"lat":-26.8,"lng":153.133},"radius_m":3000,"categories":["fast_food","restaurant"],"limit":10}
+  depth questions:
+    ? Did it name actual Caloundra/Sunshine Coast spots?
+    ? Did it suggest Bluewater Bistro, Tides Waterfront, Suttons, etc?
+
+======================================================================
+CASE: glass_house_depth
+  Knowledge depth test: rich place with deep Aboriginal + colonial + geological history.
+  user: "tell me about the Glass House Mountains, what's the story?"
+  [PASS] deep knowledge (11 anchors: ['cook', 'captain cook', 'jinibara', 'kabi kabi', 'volcanic'])  (15.9s)
+  done=True  tool_calls=[]
+  assistant (1994 chars):
+    > Mate, you're basically right on their doorstep — those dramatic volcanic plugs poking up out of the flat coastal plain to your west are the Glass House Mountains, and they're genuinely one of the great geological spectacles in southeast Queensland.
+    > 
+    > **The Geology**
+    > About 27 million years ago, magma forced its way up through the earth's crust but never quite broke the surface as a full eruption. Instead it cooled and hardened underground into incredibly tough rhyolite and trachyte rock. Over millions of years, the softer sedimentary rock around them eroded away, leaving these hard plugs standing proud — some up to 556 metres tall. That's Mount Beerwah, the tallest of the lot. There are 11 named peaks in total.
+    > 
+    > **The Dreaming**
+    > For the Jinibara and Kabi Kabi (Gubbi Gubbi) peoples, these mountains are deeply sacred. The story goes that Tibrogargan (the tallest-looking peak from the north) is the father, Beerwah is the pregnant mother, and the smaller peaks are their children. One Dreaming story tells of Tibrogargan striking his son Coonowrin (the crooked-necked peak) for abandoning his pregnant mother during a flood — which is why Coonowrin's peak leans away from Tibrogargan to this day. It's a living cultural landscape, not just a pretty view.
+    > 
+    > **Captain Cook's Take**
+    > Cook sailed past in 1770 and named them — he reckoned they looked like the glass furnaces back in his home county of Yorkshire. Hence "Glass House." Not the most poetic origin story, but it stuck.
+    > 
+    > **Climbing**
+    > Most peaks are closed to climbing out of respect for their cultural significance. Mount Ngungun is the most accessible open summit — solid 2-hour return walk with absolutely cracking 360° views of the whole group. Mount Tibrogargan is also open and a proper scramble if you're up for it.
+    > 
+    > You're passing right through the foothills — the little towns of Glass House Mountains, Beerwah, and Landsborough sit right in among them. Worth a slow drive if you've got the time before you hit Caloundra.
+  depth questions:
+    ? Did it mention the Dreamtime story (Tibrogargan as the father)?
+    ? Did it mention Cook naming them in 1770 (looked like glass furnaces)?
+    ? Did it mention which peaks are climbable (Ngungun yes, Beerwah closed)?
+
+======================================================================
+CASE: obscure_current_info
+  Current-info query (hours, EFTPOS) - must search or admit uncertainty, not bluff.
+  user: 'is the Mary Cairncross Scenic Reserve cafe open today, and do they take cards?'
+  [PASS] ran inline web_search (grounded, 5 sources)  (8.7s)
+  done=False  tool_calls=['places_search']
+  assistant (82 chars):
+    > Good question - let me pull up current info on the Mary Cairncross café right now.
+    tool: places_search req={"center":{"lat":-26.65,"lng":152.92},"radius_m":5000,"categories":["cafe"],"limit":5}
