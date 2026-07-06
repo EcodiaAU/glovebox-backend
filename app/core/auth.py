@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 class AuthUser(BaseModel):
     id: str
     email: Optional[str] = None
+    # The person's canonical Ecodia Friend id, copied into app_metadata.friend_id
+    # by the project's copy-forward trigger pair when they connect their Friend.
+    # Present only for Friend-federated users; None for plain Glovebox logins.
+    friend_id: Optional[str] = None
 
 
 def _get_token(request: Request) -> str:
@@ -80,7 +84,16 @@ def get_current_user(request: Request) -> AuthUser:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing sub claim")
 
-    return AuthUser(id=user_id, email=payload.get("email"))
+    # Supabase mints app_metadata into the access token, so the Friend id
+    # rides along with every authenticated request - no admin lookup needed.
+    app_meta = payload.get("app_metadata")
+    friend_id = app_meta.get("friend_id") if isinstance(app_meta, dict) else None
+
+    return AuthUser(
+        id=user_id,
+        email=payload.get("email"),
+        friend_id=friend_id or None,
+    )
 
 
 def get_optional_user(request: Request) -> Optional[AuthUser]:

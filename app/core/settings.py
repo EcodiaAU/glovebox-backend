@@ -93,6 +93,23 @@ class Settings(BaseSettings):
     supa_enabled: bool = Field(default=False, alias="SUPA_ENABLED")
 
     # ──────────────────────────────────────────────────────────────
+    # Ecosphere / Friend shared brain (project cuiobblgoybgmaxnsazo)
+    # The signed-in user's canonical Ecodia Friend lives here:
+    # ecosphere_accounts (owner_id = the user's friend_id, familiar_name)
+    # + ecosphere_familiar_memory (their travelling memory). The Roam Guide
+    # resolves the person's Friend name + memory prelude from this project so
+    # the guide speaks as their SAME Friend, not a separate "Roam Guide".
+    # Read-only, service-role. When unset the guide degrades to the neutral
+    # "Friend" persona with no memory (no hard failure).
+    # ──────────────────────────────────────────────────────────────
+    ecosphere_supabase_url: str | None = Field(
+        default=None, alias="ECOSPHERE_SUPABASE_URL"
+    )
+    ecosphere_service_role_key: str | None = Field(
+        default=None, alias="ECOSPHERE_SERVICE_ROLE_KEY"
+    )
+
+    # ──────────────────────────────────────────────────────────────
     # Overlays: Traffic + Hazards - shared config
     # ──────────────────────────────────────────────────────────────
 
