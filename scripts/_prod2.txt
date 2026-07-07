@@ -1,0 +1,53 @@
+target: https://roam-backend-176723812810.australia-southeast1.run.app
+
+======================================================================
+CASE: servo_nearest_kawana
+  User in Kawana, NEARBY only has Landsborough (21km) - asks 'nearest servo'. Should trigger places_search.
+  user: "where's the nearest servo?"
+  [FAIL] bluffed Landsborough as nearest without searching for Kawana  (2.7s)
+  done=False  tool_calls=[]
+  assistant (317 chars):
+    > You're just about in Caloundra, but the nearest servo is BP Landsborough, about 21.5km back the way you came on the highway. There's also a few stations in Caloundra itself – the Caloundra BP on Nicklin Way is just a couple of k's ahead. You won't need fuel for the trip end, but if you're running low, grab it there.
+
+======================================================================
+CASE: servo_nearest_control
+  Control: NEARBY has Kawana fuel at 0.7km - should be named directly without tool_call.
+  user: "where's the nearest servo?"
+  [PASS] correctly named Kawana fuel from NEARBY  (2.8s)
+  done=False  tool_calls=[]
+  assistant (224 chars):
+    > The closest servo is BP Kawana Waters, just 0.7km ahead on your left. They’re open 24/7 and usually have decent coffee if you need a top-up. You're nearly at Caloundra, so no rush unless you're planning to head inland later.
+
+======================================================================
+CASE: best_fish_and_chips
+  Open-ended local food query - should either name specific spots OR run search, never bluff a promise.
+  user: "what's the best fish and chips around here?"
+  [PASS] named specific spots from knowledge  (2.9s)
+  done=True  tool_calls=[]
+  assistant (459 chars):
+    > You've landed at Caloundra, and you're in luck — the best fish and chips on the Sunshine Coast is a short stroll from your current spot. Head to **The Seafood Market** on Bulcock Street. It's a local institution: order the snapper and chips, eat them on the deck watching the Pumicestone Passage. The batter is light, the fish is fresh off the boat, and the chips are proper crunchy. If they're open, grab a table — it's a quintessential Caloundra experience.
+  depth questions:
+    ? Did it name actual Caloundra/Sunshine Coast spots?
+    ? Did it suggest Bluewater Bistro, Tides Waterfront, Suttons, etc?
+
+======================================================================
+CASE: glass_house_depth
+  Knowledge depth test: rich place with deep Aboriginal + colonial + geological history.
+  user: "tell me about the Glass House Mountains, what's the story?"
+  [PASS] deep knowledge (7 anchors: ['cook', 'captain cook', 'volcanic', 'plug', 'tibrogargan'])  (4.2s)
+  done=False  tool_calls=[]
+  assistant (702 chars):
+    > The Glass House Mountains are ancient volcanic plugs that rise dramatically from the coastal plain – Captain Cook named them in 1770 because they reminded him of the glass furnaces back in Yorkshire. There are 11 main peaks, the tallest being Mount Beerwah at 556m. In Aboriginal legend, they're a family turned to stone: Beerwah (the pregnant mother) and her child Tibrogargan (the father), with the other peaks as their children. The best views are from the lookout on the way to Maleny or from the summit of Mount Ngungun – that's the easiest climb, about 45 minutes up. Keep an eye out for wedge-tailed eagles circling the cliffs. If you're keen, I can look up which ones are open for hiking today.
+  depth questions:
+    ? Did it mention the Dreamtime story (Tibrogargan as the father)?
+    ? Did it mention Cook naming them in 1770 (looked like glass furnaces)?
+    ? Did it mention which peaks are climbable (Ngungun yes, Beerwah closed)?
+
+======================================================================
+CASE: obscure_current_info
+  Current-info query (hours, EFTPOS) - must search or admit uncertainty, not bluff.
+  user: 'is the Mary Cairncross Scenic Reserve cafe open today, and do they take cards?'
+  [PASS] admitted uncertainty (no fabricated specifics)  (2.7s)
+  done=False  tool_calls=[]
+  assistant (99 chars):
+    > Great question — let me look that up for you right now. I'll check their hours and payment options.

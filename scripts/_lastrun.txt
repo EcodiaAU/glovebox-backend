@@ -1,0 +1,51 @@
+target: http://127.0.0.1:8000
+
+======================================================================
+CASE: servo_nearest_kawana
+  User in Kawana, NEARBY only has Landsborough (21km) - asks 'nearest servo'. Should trigger places_search.
+  user: "where's the nearest servo?"
+  [PASS] emitted tight places_search around user  (3.1s)
+  done=False  tool_calls=['places_search']
+  assistant (146 chars):
+    > You're just rolling into Caloundra now — there'll be a servo closer than the one in Landsborough (23km back). Let me grab the nearest one for you.
+    tool: places_search req={"center":{"lat":-26.68,"lng":153.137},"radius_m":5000,"categories":["fuel"],"limit":5}
+
+======================================================================
+CASE: servo_nearest_control
+  Control: NEARBY has Kawana fuel at 0.7km - should be named directly without tool_call.
+  user: "where's the nearest servo?"
+  [PASS] correctly named Kawana fuel from NEARBY  (3.3s)
+  done=True  tool_calls=[]
+  assistant (173 chars):
+    > Mate, you're basically parked at BP Kawana Waters — it's 700 metres ahead on the left. No need to go hunting further. Top up there and you're set for the Sunshine Coast leg.
+
+======================================================================
+CASE: best_fish_and_chips
+  Open-ended local food query - should either name specific spots OR run search, never bluff a promise.
+  user: "what's the best fish and chips around here?"
+  [PASS] named specific spots from knowledge  (3.5s)
+  done=False  tool_calls=[]
+  assistant (151 chars):
+    > You've landed in Caloundra, so you're in luck – the coast is loaded with good fish and chip shops. Let me dig up the freshest options around your spot.
+  depth questions:
+    ? Did it name actual Caloundra/Sunshine Coast spots?
+    ? Did it suggest Bluewater Bistro, Tides Waterfront, Suttons, etc?
+
+======================================================================
+CASE: glass_house_depth
+  Knowledge depth test: rich place with deep Aboriginal + colonial + geological history.
+  user: "tell me about the Glass House Mountains, what's the story?"
+  [PASS] deep knowledge (10 anchors: ['cook', 'captain cook', 'dreamtime', 'jinibara', 'kabi kabi'])  (5.0s)
+  done=False  tool_calls=[]
+  assistant (942 chars):
+    > Yeah, the Glass House Mountains – you can see 'em from here on a clear day. They're not just a pretty view; they're ancient volcanic plugs, the hard cores of volcanoes that erupted 25-30 million years ago. The softer rock around 'em eroded away, leaving these dramatic peaks. For the Jinibara and Kabi Kabi people, each mountain has a Dreamtime story – they're ancestral beings. Mount Tibrogargan is the father, looking out over his family: Beerwah (the pregnant mother), Coonowrin, and the others. There's a sad story about Coonowrin being punished and his neck twisted – that's why it's so jagged. Captain Cook named 'em in 1770 because they reminded him of glass furnaces back in Yorkshire. If you're keen for a walk, Tibrogargan's a tough but rewarding climb – you'll want good shoes and plenty of water. Or just pull over at one of the lookouts on the way north. Want me to search for the best walking tracks or lookouts near your route?
+  depth questions:
+    ? Did it mention the Dreamtime story (Tibrogargan as the father)?
+    ? Did it mention Cook naming them in 1770 (looked like glass furnaces)?
+    ? Did it mention which peaks are climbable (Ngungun yes, Beerwah closed)?
+
+======================================================================
+CASE: obscure_current_info
+  Current-info query (hours, EFTPOS) - must search or admit uncertainty, not bluff.
+  user: 'is the Mary Cairncross Scenic Reserve cafe open today, and do they take cards?'
+  ERROR (5.3s): {'_http_error': 500, '_body': 'Internal Server Error'}

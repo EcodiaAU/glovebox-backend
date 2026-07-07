@@ -1,0 +1,58 @@
+target: https://roam-backend-176723812810.australia-southeast1.run.app
+
+======================================================================
+CASE: servo_nearest_kawana
+  User in Kawana, NEARBY only has Landsborough (21km) - asks 'nearest servo'. Should trigger places_search.
+  user: "where's the nearest servo?"
+  [FAIL] places_search center not near user GPS ({'lat': -26.8, 'lng': 153.133})  (5.4s)
+  done=False  tool_calls=['places_search']
+  assistant (254 chars):
+    > The nearest servo is BP Landsborough, about 21.5 km ahead on the way to Caloundra. You're almost at your destination, so if you're not running low, you could also wait until you get into town. Want me to check if there's a closer one in Caloundra itself?
+    tool: places_search req={"center":{"lat":-26.8,"lng":153.133},"radius_m":5000,"categories":["fuel"],"limit":5}
+
+======================================================================
+CASE: servo_nearest_control
+  Control: NEARBY has Kawana fuel at 0.7km - should be named directly without tool_call.
+  user: "where's the nearest servo?"
+  [PASS] correctly named Kawana fuel from NEARBY  (4.2s)
+  done=False  tool_calls=[]
+  assistant (284 chars):
+    > You're practically rolling past one now — BP Kawana Waters is just 700 metres ahead on your left at Kawana Shoppingworld. It's a solid servo with 98, diesel, and a decent coffee machine if you need a top-up before you settle into Caloundra. Want me to pull up directions or call them?
+
+======================================================================
+CASE: best_fish_and_chips
+  Open-ended local food query - should either name specific spots OR run search, never bluff a promise.
+  user: "what's the best fish and chips around here?"
+  [PASS] named specific spots from knowledge  (2.7s)
+  done=False  tool_calls=[]
+  assistant (391 chars):
+    > You've landed in Caloundra, and for top-notch fish and chips, head to The Wharf at Kings Beach. Grab a feed from The Spot on Kings Beach — their reef fish is always fresh, and the chips are that perfect golden crunch. If you're happy with a short walk, the takeaway window at Bulcock Beach has a solid local following too. Want me to look up opening hours or anything else while you're here?
+  depth questions:
+    ? Did it name actual Caloundra/Sunshine Coast spots?
+    ? Did it suggest Bluewater Bistro, Tides Waterfront, Suttons, etc?
+
+======================================================================
+CASE: glass_house_depth
+  Knowledge depth test: rich place with deep Aboriginal + colonial + geological history.
+  user: "tell me about the Glass House Mountains, what's the story?"
+  [PASS] deep knowledge (9 anchors: ['cook', 'captain cook', 'jinibara', 'kabi kabi', 'volcanic'])  (6.1s)
+  done=False  tool_calls=[]
+  assistant (1357 chars):
+    > Alright! The Glass House Mountains are those dramatic volcanic plugs you can see rising out of the coastal plain between Brisbane and the Sunshine Coast. Captain Cook named them in 1770 – said they looked like the glass furnaces back in Yorkshire. There are 11 main peaks, all remnants of volcanic activity 25-30 million years ago. The most famous ones are Mount Beerwah (the tallest, at 556m), Mount Tibrogargan (the one that looks like a sleeping giant), and Mount Coonowrin (the 'crooked neck' one).
+    > 
+    > In Aboriginal legend (Jinibara and Kabi Kabi people), Tibrogargan is the father, Beerwah the mother, and Coonowrin is their son who was turned to stone for not helping during a great flood. The peaks are culturally significant – some are closed to climbing out of respect. Mount Beerwah and Tibrogargan are the main ones for hikers, but they're serious scrambles – not casual walks. The views from the top are incredible, looking right across the Glass House Mountains National Park and out to the coast.
+    > 
+    > You're only about 20 minutes from the national park now – if you've got time, a quick detour to the Mary Cairncross Scenic Reserve lookout gives you a stunning panoramic view without the hike. Or stop at the Glass House Mountains township for a coffee and soak in the scenery before you hit Caloundra. Want me to search for a good cafe stop there?
+  depth questions:
+    ? Did it mention the Dreamtime story (Tibrogargan as the father)?
+    ? Did it mention Cook naming them in 1770 (looked like glass furnaces)?
+    ? Did it mention which peaks are climbable (Ngungun yes, Beerwah closed)?
+
+======================================================================
+CASE: obscure_current_info
+  Current-info query (hours, EFTPOS) - must search or admit uncertainty, not bluff.
+  user: 'is the Mary Cairncross Scenic Reserve cafe open today, and do they take cards?'
+  [FAIL] unclear behaviour: great question! mary cairncross scenic reserve's cafe is the perfect spot for a pit stop on your way into caloundra. let  (3.3s)
+  done=False  tool_calls=[]
+  assistant (200 chars):
+    > Great question! Mary Cairncross Scenic Reserve's cafe is the perfect spot for a pit stop on your way into Caloundra. Let me check the latest for you – I'll look up their hours and payment options now.
