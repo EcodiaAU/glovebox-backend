@@ -21,3 +21,7 @@ PyJWT[crypto]>=2.8.0
 app-store-server-library>=1.6.0
 google-api-python-client>=2.150.0
 google-auth>=2.34.0
+
+# Server-side error capture (unified Sentry bug-wall). FastAPI/Starlette
+# integration auto-enables when sentry_sdk.init runs before the app is created.
+sentry-sdk==2.64.0

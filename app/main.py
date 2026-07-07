@@ -17,6 +17,24 @@ from starlette.middleware.gzip import GZipMiddleware
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+# Server-side error capture (unified Sentry bug-wall). Initialised BEFORE the
+# FastAPI app is created so sentry-sdk's Starlette/FastAPI ASGI integration hooks
+# every request. DSN from env (SENTRY_DSN, a Cloud Run env var); unset disables
+# capture cleanly so local dev is unaffected.
+import os  # noqa: E402
+
+_sentry_dsn = os.environ.get("SENTRY_DSN")
+if _sentry_dsn:
+    import sentry_sdk  # noqa: E402
+
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+        release=os.environ.get("K_REVISION"),
+        traces_sample_rate=0.0,
+        send_default_pii=False,
+    )
+
 from app.core.settings import settings  # noqa: E402
 from app.core.storage import connect_sqlite, ensure_schema  # noqa: E402
 from app.core.edges_db import create_edges_db, EdgesDB  # noqa: E402
@@ -135,6 +153,20 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.include_router(api_router)
+
+
+# Guarded Sentry canary (unified Sentry-wall verify gate). Fires only when the
+# query token matches SENTRY_CANARY_TOKEN, then raises so the exception is
+# captured by Sentry (the 500 is expected). A missing/wrong token returns 401,
+# which Sentry does not capture, so the route is inert for anyone without it.
+@app.get("/__sentry_canary")
+async def _sentry_canary(t: str = "", id: str = ""):
+    tok = os.environ.get("SENTRY_CANARY_TOKEN")
+    if not tok or t != tok:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401, detail="unauthorized")
+    raise RuntimeError(f"glovebox-roam sentry canary {id}".strip())
 
 
 # ──────────────────────────────────────────────────────────────
