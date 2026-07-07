@@ -2,8 +2,8 @@
 #
 # Resolves the signed-in person's canonical Ecodia Friend from the SHARED
 # Ecosphere/Friend Supabase project (cuiobblgoybgmaxnsazo): their Friend name
-# (ecosphere_accounts.familiar_name) and their travelling memory
-# (ecosphere_familiar_memory). This is what lets the Glovebox guide speak as the
+# (ecosphere_accounts.friend_name) and their travelling memory
+# (ecosphere_friend_memory). This is what lets the Glovebox guide speak as the
 # person's SAME Friend - the one they named and that remembers them across every
 # Ecodia surface - rather than a separate "Roam Guide" character.
 #
@@ -80,7 +80,7 @@ async def _get_rows(
 ) -> List[Dict[str, Any]]:
     try:
         r = await client.get(
-            f"{base}/rest/v1/ecosphere_familiar_memory", params=params, headers=headers
+            f"{base}/rest/v1/ecosphere_friend_memory", params=params, headers=headers
         )
         if r.status_code >= 400:
             logger.warning(
@@ -119,7 +119,7 @@ async def resolve_friend(friend_id: Optional[str]) -> Tuple[Optional[str], str]:
                 f"{base}/rest/v1/ecosphere_accounts",
                 params={
                     "owner_id": f"eq.{friend_id}",
-                    "select": "id,familiar_name",
+                    "select": "id,friend_name",
                     "limit": "1",
                 },
                 headers=headers,
@@ -136,7 +136,7 @@ async def resolve_friend(friend_id: Optional[str]) -> Tuple[Optional[str], str]:
                 return None, ""
             acct = rows[0]
             account_id = acct.get("id")
-            friend_name = (acct.get("familiar_name") or "").strip() or None
+            friend_name = (acct.get("friend_name") or "").strip() or None
 
             memory_prelude = ""
             if account_id:

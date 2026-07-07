@@ -95,8 +95,8 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────────
     # Ecosphere / Friend shared brain (project cuiobblgoybgmaxnsazo)
     # The signed-in user's canonical Ecodia Friend lives here:
-    # ecosphere_accounts (owner_id = the user's friend_id, familiar_name)
-    # + ecosphere_familiar_memory (their travelling memory). The Roam Guide
+    # ecosphere_accounts (owner_id = the user's friend_id, friend_name)
+    # + ecosphere_friend_memory (their travelling memory). The Roam Guide
     # resolves the person's Friend name + memory prelude from this project so
     # the guide speaks as their SAME Friend, not a separate "Roam Guide".
     # Read-only, service-role. When unset the guide degrades to the neutral
