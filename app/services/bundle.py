@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Maps overlay pack-type → ZIP filename
 _OVERLAY_ZIP_NAMES = {
+    "corridor_tiles": "corridor-tiles.pmtiles",  # binary z16 street-zoom basemap
     "places":       "places.json",
     "traffic":      "traffic.json",
     "hazards":      "hazards.json",
@@ -45,6 +46,7 @@ _OVERLAY_ZIP_NAMES = {
 # Maps manifest attribute name → pack-type for bulk queries
 _MANIFEST_KEY_MAP = {
     "corridor_key":      "corridor",
+    "corridor_tiles_key": "corridor_tiles",
     "places_key":        "places",
     "traffic_key":       "traffic",
     "hazards_key":       "hazards",
@@ -143,10 +145,13 @@ class Bundle:
         school_zones_ready: bool = False,
         roadkill_key: str | None = None,
         roadkill_ready: bool = False,
+        corridor_tiles_key: str | None = None,
+        corridor_tiles_ready: bool = False,
     ) -> OfflineBundleManifest:
         # Build key map for bulk byte-size query - only include ready overlays.
         ready_flags = {
-            "corridor": corridor_ready, "places": places_ready,
+            "corridor": corridor_ready, "corridor_tiles": corridor_tiles_ready,
+            "places": places_ready,
             "traffic": traffic_ready, "hazards": hazards_ready,
             "weather": weather_ready, "flood": flood_ready,
             "fuel": fuel_ready, "coverage": coverage_ready,
@@ -158,7 +163,8 @@ class Bundle:
             "roadkill": roadkill_ready,
         }
         key_map = {
-            "corridor": corridor_key, "places": places_key,
+            "corridor": corridor_key, "corridor_tiles": corridor_tiles_key,
+            "places": places_key,
             "traffic": traffic_key, "hazards": hazards_key,
             "weather": weather_key, "flood": flood_key,
             "fuel": fuel_key, "coverage": coverage_key,
@@ -186,6 +192,7 @@ class Bundle:
             styles=styles,
             navpack_status="ready" if navpack_ready else "missing",
             corridor_status="ready" if corridor_ready else "missing",
+            corridor_tiles_status="ready" if corridor_tiles_ready else "missing",
             places_status="ready" if places_ready else "missing",
             traffic_status="ready" if traffic_ready else "missing",
             hazards_status="ready" if hazards_ready else "missing",
@@ -205,6 +212,7 @@ class Bundle:
             school_zones_status="ready" if school_zones_ready else "missing",
             roadkill_status="ready" if roadkill_ready else "missing",
             corridor_key=corridor_key,
+            corridor_tiles_key=corridor_tiles_key,
             places_key=places_key,
             traffic_key=traffic_key,
             hazards_key=hazards_key,

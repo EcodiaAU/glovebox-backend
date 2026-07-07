@@ -740,6 +740,60 @@ class GuideTurnResponse(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
+# Simple /guide/ask alias for mobile clients
+# Native iOS + Android send a tiny question-shaped payload rather
+# than the full GuideTurnRequest tree. The /guide/ask endpoint
+# translates this into a GuideTurnRequest internally so mobile
+# doesn't have to build the full GuideContext.
+# ──────────────────────────────────────────────────────────────
+
+
+class GuideAskContext(BaseModel):
+    active_trip_id: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    # Local time context so the model answers "what time is it" and
+    # "is the next servo open" in the user's clock, not UTC.
+    timezone: Optional[str] = None  # IANA, e.g. "Australia/Brisbane"
+    local_time_iso: Optional[str] = None  # "2026-06-03T15:30:00"
+    utc_offset_minutes: Optional[int] = None  # e.g. 600 for UTC+10
+
+
+class GuideAskRequest(BaseModel):
+    question: str
+    context: Optional[GuideAskContext] = None
+
+
+class GuideAskAction(BaseModel):
+    """Structured action button rendered next to a guide answer.
+
+    Each action surfaces as a card-style tap target on mobile. The type
+    drives which intent the client fires (web URL, phone dialler, map
+    centre, save-place). Fields not relevant to the type are null.
+    """
+
+    type: str  # "web" | "call" | "map" | "save"
+    label: str
+    place_id: Optional[str] = None
+    place_name: Optional[str] = None
+    url: Optional[str] = None
+    tel: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+
+
+class GuideAskResponse(BaseModel):
+    text: str = ""
+    sources: List[str] = Field(default_factory=list)
+    # Structured action cards rendered under the answer. Mobile clients tap
+    # these to navigate, call, or save - replaces "free-form prose with
+    # links buried inline".
+    actions: List[GuideAskAction] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────────────────────
 # Traffic + Hazards overlays
 # ──────────────────────────────────────────────────────────────
 
@@ -977,6 +1031,8 @@ class OfflineBundleManifest(BaseModel):
 
     navpack_status: AssetStatus = "missing"
     corridor_status: AssetStatus = "missing"
+    # z16 street-zoom corridor pmtiles for offline turn-by-turn street view.
+    corridor_tiles_status: AssetStatus = "missing"
     places_status: AssetStatus = "missing"
     traffic_status: AssetStatus = "missing"
     hazards_status: AssetStatus = "missing"
@@ -988,6 +1044,7 @@ class OfflineBundleManifest(BaseModel):
     wildlife_status: AssetStatus = "missing"
 
     corridor_key: Optional[str] = None
+    corridor_tiles_key: Optional[str] = None
     places_key: Optional[str] = None
     traffic_key: Optional[str] = None
     hazards_key: Optional[str] = None

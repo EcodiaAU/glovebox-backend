@@ -53,6 +53,7 @@ def _cache_conn_ref() -> Optional[sqlite3.Connection]:
 # Lifespan (replaces deprecated @app.on_event)
 # ──────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cache_conn, _edges_db, _places_store
@@ -67,7 +68,9 @@ async def lifespan(app: FastAPI):
     try:
         _edges_db = create_edges_db(
             database_url=settings.edges_database_url,
-            sqlite_path=settings.edges_db_path if not settings.edges_database_url else None,
+            sqlite_path=settings.edges_db_path
+            if not settings.edges_database_url
+            else None,
         )
     except FileNotFoundError as exc:
         # Non-fatal in development - corridor endpoints will fail gracefully
@@ -141,6 +144,7 @@ app.include_router(api_router)
 # Dependency providers + overrides
 # ──────────────────────────────────────────────────────────────
 
+
 def _register_dependencies(app: FastAPI) -> None:
     from app.api import nav as nav_api
     from app.api import bundle as bundle_api
@@ -166,7 +170,10 @@ def _register_dependencies(app: FastAPI) -> None:
     def provide_corridor_service() -> Corridor:
         if _edges_db is None:
             from app.core.errors import service_unavailable
-            service_unavailable("edges_db_unavailable", "Edges database is not available")
+
+            service_unavailable(
+                "edges_db_unavailable", "Edges database is not available"
+            )
         return Corridor(
             cache_conn=_cache_conn,
             edges_db=_edges_db,  # type: ignore[arg-type]
@@ -209,7 +216,9 @@ def _register_dependencies(app: FastAPI) -> None:
     def provide_rest_areas_service() -> RestAreas:
         return RestAreas(conn=_cache_conn)
 
-    app.dependency_overrides[rest_areas_api.get_rest_areas_service] = provide_rest_areas_service
+    app.dependency_overrides[rest_areas_api.get_rest_areas_service] = (
+        provide_rest_areas_service
+    )
 
     # Coverage
     app.dependency_overrides[coverage_api.get_cache_conn] = provide_cache_conn
@@ -241,14 +250,20 @@ def _register_dependencies(app: FastAPI) -> None:
     # Roadkill
     app.dependency_overrides[roadkill_api.get_cache_conn] = provide_cache_conn
 
+    # Unified overlay dispatcher (mobile-facing /nav/overlay/{kind})
+    app.dependency_overrides[overlay_unified_api.get_cache_conn] = provide_cache_conn
+
     # Presence
     from app.api import presence as presence_api
+
     app.dependency_overrides[presence_api.get_cache_conn] = provide_cache_conn
 
     # Observations
     from app.api import observations as observations_api
+
     app.dependency_overrides[observations_api.get_cache_conn] = provide_cache_conn
 
     # Peer Sync
     from app.api import peer_sync as peer_sync_api
+
     app.dependency_overrides[peer_sync_api.get_cache_conn] = provide_cache_conn

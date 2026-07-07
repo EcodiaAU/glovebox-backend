@@ -1,8 +1,13 @@
 # app/api/account.py
 #
 # Account management endpoints.
-# DELETE /account - permanently deletes the authenticated user and all
-# associated data (cascade rules on auth.users handle table cleanup).
+# DELETE /account - permanently, irreversibly erases the authenticated user and
+# every Glovebox row keyed to them. Delegates to the public.delete_glovebox_account
+# SECURITY DEFINER RPC (the single canonical erase definition, shared with the web
+# app and the native apps) so the deletion is atomic and enumerates every app table
+# explicitly rather than relying on implicit auth.users cascades (roam_plan_invites
+# is NO ACTION and would otherwise block the delete). Required for Apple guideline
+# 5.1.1(v), Google Play data-deletion policy, and GDPR Art 17.
 
 from __future__ import annotations
 
@@ -36,15 +41,19 @@ async def delete_account(
     """
     Permanently delete the authenticated user's account and all associated data.
 
-    Supabase cascade rules on auth.users ensure all rows in user_entitlements,
-    user_trip_counts, saved_places, roam_plans, roam_plan_members,
-    emergency_contacts, and stop_memories are removed automatically.
+    Calls the public.delete_glovebox_account RPC as service_role, passing the
+    authenticated user's id. The RPC deletes, in one atomic transaction, every
+    Glovebox user-keyed row (public_trips, public_trip_clones, roam_plans,
+    roam_plan_members, roam_plan_invites, saved_places, stop_memories,
+    emergency_contacts, user_trip_counts, user_entitlements, entitlements) and
+    the auth.users row - which cascades auth.identities, including the
+    custom:friend link for THIS app (the separate Friend IdP account is untouched).
     """
     supa = get_supabase_admin()
 
     try:
-        # Supabase Admin API: delete the auth user (cascades to all app tables)
-        supa.auth.admin.delete_user(user.id)
+        # Single canonical erase: atomic, enumerates every table, removes auth user.
+        supa.rpc("delete_glovebox_account", {"p_user_id": user.id}).execute()
     except Exception as exc:
         logger.error("[account/delete] Failed to delete user %s: %s", user.id, exc)
         return JSONResponse(

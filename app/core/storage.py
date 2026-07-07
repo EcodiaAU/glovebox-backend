@@ -82,6 +82,9 @@ def deferred_commit(conn: sqlite3.Connection):
 _PACK_TABLE_MAP: Dict[str, Tuple[str, str]] = {
     "nav":           ("nav_packs",          "route_key"),
     "corridor":      ("corridor_packs",     "corridor_key"),
+    # Binary z16 street-zoom pmtiles for the route corridor (per-trip offline
+    # street view). Stored in pack_json like the others (BLOB is schema-agnostic).
+    "corridor_tiles": ("corridor_tile_packs", "corridor_tiles_key"),
     "places":        ("places_packs",       "places_key"),
     "traffic":       ("traffic_packs",      "traffic_key"),
     "hazards":       ("hazard_packs",       "hazards_key"),
@@ -170,6 +173,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             buffer_m INTEGER NOT NULL,
             max_edges INTEGER NOT NULL,
             algo_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            pack_json BLOB NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corridor_tile_packs (
+            corridor_tiles_key TEXT PRIMARY KEY,
+            route_key TEXT NOT NULL,
+            bbox TEXT NOT NULL,
+            maxzoom INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             pack_json BLOB NOT NULL
         );
@@ -599,6 +614,43 @@ def get_corridor_pack(conn: sqlite3.Connection, corridor_key: str) -> Optional[d
     if not row:
         return None
     return orjson.loads(row[0])
+
+
+def put_corridor_tiles_pack(
+    conn: sqlite3.Connection,
+    *,
+    corridor_tiles_key: str,
+    route_key: str,
+    bbox: str,
+    maxzoom: int,
+    created_at: str,
+    pmtiles_bytes: bytes,
+    _commit: bool = True,
+) -> int:
+    """Store a generated z16 corridor pmtiles (built by tiles/build-corridor.sh)
+    so the offline bundle ships it as corridor-tiles.pmtiles. The blob is raw
+    binary, not JSON, but rides in the same pack_json column as every other
+    pack so the generic bulk fetch in build_zip picks it up unchanged."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO corridor_tile_packs
+          (corridor_tiles_key, route_key, bbox, maxzoom, created_at, pack_json)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (corridor_tiles_key, route_key, bbox, int(maxzoom), created_at, pmtiles_bytes),
+    )
+    if _commit:
+        conn.commit()
+    return len(pmtiles_bytes)
+
+
+def get_corridor_tiles_pack_raw(conn: sqlite3.Connection, corridor_tiles_key: str) -> Optional[bytes]:
+    cur = conn.execute(
+        "SELECT pack_json FROM corridor_tile_packs WHERE corridor_tiles_key=?;",
+        (corridor_tiles_key,),
+    )
+    row = cur.fetchone()
+    return bytes(row[0]) if row else None
 
 
 # ──────────────────────────────────────────────────────────────

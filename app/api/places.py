@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+
 
 from app.core.contracts import (
     PlacesRequest,
@@ -54,37 +57,102 @@ def get_corridor_service() -> Corridor:
 
 _CORRIDOR_DEFAULT_CATS: list[PlaceCategory] = [
     # ── Essentials & safety (non-negotiable for remote driving) ──
-    "fuel", "ev_charging", "rest_area", "toilet", "water",
-    "dump_point", "mechanic", "hospital", "pharmacy",
+    "fuel",
+    "ev_charging",
+    "rest_area",
+    "toilet",
+    "water",
+    "dump_point",
+    "mechanic",
+    "hospital",
+    "pharmacy",
     # ── Supplies ──
-    "grocery", "town", "atm", "laundromat",
+    "grocery",
+    "town",
+    "atm",
+    "laundromat",
     # ── Food & drink ──
-    "bakery", "cafe", "restaurant", "fast_food", "pub", "bar",
+    "bakery",
+    "cafe",
+    "restaurant",
+    "fast_food",
+    "pub",
+    "bar",
     # ── Accommodation ──
-    "camp", "hotel", "motel", "hostel",
+    "camp",
+    "hotel",
+    "motel",
+    "hostel",
     # ── Nature & outdoors ──
-    "viewpoint", "waterfall", "swimming_hole", "beach",
-    "national_park", "hiking", "picnic", "hot_spring",
-    "cave", "fishing", "surf",
+    "viewpoint",
+    "waterfall",
+    "swimming_hole",
+    "beach",
+    "national_park",
+    "hiking",
+    "picnic",
+    "hot_spring",
+    "cave",
+    "fishing",
+    "surf",
     # ── Family & recreation ──
-    "playground", "pool", "zoo", "theme_park",
-    "dog_park", "golf", "cinema",
+    "playground",
+    "pool",
+    "zoo",
+    "theme_park",
+    "dog_park",
+    "golf",
+    "cinema",
     # ── Culture & sightseeing ──
-    "visitor_info", "museum", "gallery", "heritage",
-    "winery", "brewery", "attraction", "market", "park",
-    "library", "showground",
+    "visitor_info",
+    "museum",
+    "gallery",
+    "heritage",
+    "winery",
+    "brewery",
+    "attraction",
+    "market",
+    "park",
+    "library",
+    "showground",
 ]
 
 _SUGGEST_DEFAULT_CATS: list[PlaceCategory] = [
-    "fuel", "ev_charging", "rest_area", "water", "toilet",
-    "bakery", "cafe", "restaurant", "fast_food", "pub",
-    "camp", "motel", "hotel",
-    "viewpoint", "waterfall", "swimming_hole", "beach",
-    "national_park", "hiking", "picnic", "hot_spring",
-    "cave", "fishing", "surf",
-    "playground", "pool", "zoo",
-    "visitor_info", "winery", "brewery", "attraction",
-    "museum", "heritage", "market", "showground",
+    "fuel",
+    "ev_charging",
+    "rest_area",
+    "water",
+    "toilet",
+    "bakery",
+    "cafe",
+    "restaurant",
+    "fast_food",
+    "pub",
+    "camp",
+    "motel",
+    "hotel",
+    "viewpoint",
+    "waterfall",
+    "swimming_hole",
+    "beach",
+    "national_park",
+    "hiking",
+    "picnic",
+    "hot_spring",
+    "cave",
+    "fishing",
+    "surf",
+    "playground",
+    "pool",
+    "zoo",
+    "visitor_info",
+    "winery",
+    "brewery",
+    "attraction",
+    "museum",
+    "heritage",
+    "market",
+    "showground",
     "town",
 ]
 
@@ -92,6 +160,7 @@ _SUGGEST_DEFAULT_CATS: list[PlaceCategory] = [
 # ──────────────────────────────────────────────────────────────
 # /places/search
 # ──────────────────────────────────────────────────────────────
+
 
 @router.post("/search", response_model=PlacesPack)
 def places_search(
@@ -107,18 +176,30 @@ def places_search(
 
         bbox_tuple: tuple[float, float, float, float] | None = None
         if req.bbox:
-            bbox_tuple = (req.bbox.minLng, req.bbox.minLat, req.bbox.maxLng, req.bbox.maxLat)
+            bbox_tuple = (
+                req.bbox.minLng,
+                req.bbox.minLat,
+                req.bbox.maxLng,
+                req.bbox.maxLat,
+            )
 
         limit = min(req.limit or 10, 10)
 
+        # Custom/partner POIs (Locals merchants etc.) matched by name, so a typed
+        # business name finds the Ecosphere-listed business, not just Mapbox places.
+        custom = places.custom_by_name(req.query.strip(), req.bbox, limit)
+
         try:
             mapbox = _get_mapbox(conn=cache_conn)
-            return mapbox.search(
+            pack = mapbox.search(
                 query=req.query.strip(),
                 proximity=proximity,
                 limit=limit,
                 bbox=bbox_tuple,
             )
+            if custom:
+                pack.items = places._merge_front(custom, pack.items)[:limit]
+            return pack
         except RuntimeError as exc:
             logger.error("mapbox_search_failed: %s - falling back to overpass", exc)
 
@@ -129,8 +210,78 @@ def places_search(
 
 
 # ──────────────────────────────────────────────────────────────
+# /places/along-route
+#
+# Mobile-friendly alias for /places/corridor that takes the simpler
+# {polyline6, kinds, max_per_kind, buffer_km} shape that Android and iOS
+# send. Calls Places.search_corridor_polyline directly so the result is
+# balanced across the WHOLE route rather than clustered around a single
+# bbox centre. Tate flagged "places clustered at the origin not balanced
+# across the route" - that was the client falling back to /places/search
+# with a bbox centred on the destination because /places/corridor required
+# a corridor_key the client never built.
+# ──────────────────────────────────────────────────────────────
+
+
+class PlacesAlongRouteRequest(BaseModel):
+    polyline6: str
+    kinds: Optional[List[str]] = None  # mobile-side name
+    categories: Optional[List[PlaceCategory]] = None  # backend name
+    buffer_km: Optional[float] = 35.0
+    max_per_kind: Optional[int] = 100
+    limit: Optional[int] = None
+    stop_density: int = 3
+
+
+@router.post("/along-route", response_model=PlacesPack)
+def places_along_route(
+    req: PlacesAlongRouteRequest,
+    places: Places = Depends(get_places_service),
+) -> PlacesPack:
+    """Balanced corridor search along the supplied polyline."""
+    if not req.polyline6 or len(req.polyline6) < 10:
+        bad_request("bad_places_request", "polyline6 is required")
+
+    # categories takes precedence; kinds is the mobile alias
+    cats: list[PlaceCategory] = (
+        req.categories or [k for k in (req.kinds or []) if k] or _CORRIDOR_DEFAULT_CATS
+    )
+
+    buffer_km = float(req.buffer_km or 35.0)
+    density_mult = density_budget_multiplier(req.stop_density)
+    if req.limit:
+        limit = int(max(1, int(req.limit) * density_mult))
+    elif req.max_per_kind:
+        # Translate per-kind cap into an overall budget that scales with
+        # how many categories the caller asked for.
+        limit = int(max(1, int(req.max_per_kind) * max(1, len(cats)) * density_mult))
+    else:
+        from app.services.places import _corridor_places_budget, _route_extent_km
+
+        extent_km = _route_extent_km(req.polyline6)
+        limit = int(max(1, _corridor_places_budget(extent_km) * density_mult))
+
+    logger.info(
+        "places_along_route: cats=%d buffer_km=%s limit=%d density=%d",
+        len(cats),
+        buffer_km,
+        limit,
+        req.stop_density,
+    )
+
+    return places.search_corridor_polyline(
+        polyline6=req.polyline6,
+        buffer_km=buffer_km,
+        categories=cats,
+        limit=limit,
+        sample_interval_km=8.0,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # /places/corridor
 # ──────────────────────────────────────────────────────────────
+
 
 @router.post("/corridor", response_model=PlacesPack)
 def places_corridor(
@@ -151,6 +302,7 @@ def places_corridor(
         limit = int(max(1, int(req.limit) * _density_mult))
     elif geometry and len(geometry) > 10:
         from app.services.places import _corridor_places_budget, _route_extent_km
+
         extent_km = _route_extent_km(geometry)
         limit = int(max(1, _corridor_places_budget(extent_km) * _density_mult))
     else:
@@ -199,6 +351,7 @@ def places_corridor(
 # /places/suggest
 # ──────────────────────────────────────────────────────────────
 
+
 @router.post("/suggest", response_model=PlacesSuggestResponse)
 def places_suggest(
     req: PlacesSuggestRequest,
@@ -223,6 +376,7 @@ def places_suggest(
 # ──────────────────────────────────────────────────────────────
 # /places/stop-suggestions
 # ──────────────────────────────────────────────────────────────
+
 
 @router.post("/stop-suggestions", response_model=StopSuggestionsResponse)
 def places_stop_suggestions(

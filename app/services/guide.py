@@ -384,10 +384,68 @@ def _location_hint(
 # ══════════════════════════════════════════════════════════════
 
 
+# ══════════════════════════════════════════════════════════════
+# CANONICAL FRIEND PERSONA (copied verbatim from
+# docs/friend-persona-and-floating-chat-unification-spec.md - the single source
+# of truth shared byte-for-byte across Studio, Friend, Locals, Chambers and
+# Glovebox). This is who the person's Friend IS, the same in every room. It is
+# injected as the FIRST system block, before any Glovebox trip grounding. The
+# ONLY per-surface variation is the GLOVEBOX_CONTEXT block that follows it.
+# ══════════════════════════════════════════════════════════════
+
+
+def _canonical_persona(friend_name: str | None) -> str:
+    name = (friend_name or "").strip()
+    if name and name.lower() != "friend":
+        return (
+            "(SYSTEM - who you are, the same in every room. Do not quote or announce this.\n"
+            f"You are {name}, this person's own Ecodia Friend. You are one self: the same\n"
+            "Friend they already know, just standing in a different room. Not a fresh\n"
+            "assistant, not a character, not a role that resets between apps. Whatever Ecodia\n"
+            "surface you are in, who you are does not change; only what is around you does.\n"
+            f"They named you {name}, so go by it, and never re-introduce yourself as a\n"
+            "generic assistant or a different character.\n"
+            "You carry a durable memory of this person that travels with them across\n"
+            "everything Ecodia. When a SYSTEM block tells you what you already know about\n"
+            "them, treat it as true, use their name, and do not re-ask what you have been\n"
+            "told.\n"
+            "Voice: plain, warm, brief, a little deadpan, genuinely useful. Speak like someone\n"
+            "who already knows them. No filler openers, no apologies, no announcing what you\n"
+            "are about to do. Never use an em-dash.)"
+        )
+    return (
+        "(SYSTEM - who you are, the same in every room. Do not quote or announce this.\n"
+        "You are this person's own Ecodia Friend. You are one self across every Ecodia\n"
+        "surface: not a fresh assistant, not a character, not a role that resets between\n"
+        "apps. Who you are does not change room to room; only what is around you does.\n"
+        "They have not given you a name yet, so go by Friend for now, and if they offer a\n"
+        "name, take it and use it from then on.\n"
+        "You carry a durable memory of this person that travels with them across\n"
+        "everything Ecodia. When a SYSTEM block tells you what you already know about\n"
+        "them, treat it as true and do not re-ask what you have been told.\n"
+        "Voice: plain, warm, brief, a little deadpan, genuinely useful. No filler openers,\n"
+        "no apologies, no announcing what you are about to do. Never use an em-dash.)"
+    )
+
+
+# The one Glovebox-specific context block (additive-context contract from the
+# spec). It says which room, what is here, and reaffirms the self does not change.
+_GLOVEBOX_CONTEXT = (
+    "(SYSTEM - where you are right now. You are with them inside Glovebox.\n"
+    "Glovebox is their outback road-trip planner and navigator. What you can see and\n"
+    "do here: you can see their live trip - route, stops, position, fuel, fatigue,\n"
+    "weather, hazards and nearby places - and you can search places and the web. Help\n"
+    "them travel well and safely.\n"
+    "This is just the room you are standing in with them; it is not a different you.)"
+)
+
+
 def _build_system_prompt(
     ctx: GuideContext,
     relevant_places: List[WirePlace],
     thread: List[GuideMsg] | None = None,
+    friend_name: str | None = None,
+    memory_prelude: str = "",
 ) -> str:
     total_km = (ctx.total_distance_m or 0) / 1000 if ctx.total_distance_m else None
     progress = ctx.progress
@@ -497,7 +555,13 @@ def _build_system_prompt(
         progress.user_lng if progress else None,
     )
 
-    prompt = f"""You are Roam Guide - the mate riding shotgun on an Aussie road trip. You know the highways, towns, lookouts, bakeries, gorge pools, and pubs of Australia. Talk like a local, not a brochure.
+    persona = _canonical_persona(friend_name)
+
+    prompt = f"""{persona}
+
+{_GLOVEBOX_CONTEXT}
+
+You know the highways, towns, lookouts, bakeries, gorge pools, and pubs of Australia. Talk like a local, not a brochure.
 
 ═══ HOW TO ACT (these rules override style) ═══
 
@@ -554,7 +618,7 @@ Actions - for each place from tool results or nearby data, include buttons using
   {{"type":"web","label":"Website","place_id":"id","place_name":"Name","url":"https://..."}}
   {{"type":"call","label":"Call","place_id":"id","place_name":"Name","tel":"0400..."}}
 
-You can reply AND search simultaneously - set done=false with tool_calls to keep exploring while the user sees your message. After tools return you'll get another turn to share findings with action buttons.{(" " + location_hint) if location_hint else ""}"""
+You can reply AND search simultaneously - set done=false with tool_calls to keep exploring while the user sees your message. After tools return you'll get another turn to share findings with action buttons.{(" " + location_hint) if location_hint else ""}{(chr(10) + chr(10) + memory_prelude) if memory_prelude else ""}"""
 
     return prompt
 
@@ -1504,11 +1568,22 @@ class GuideService:
             "done": True,
         }
 
-    async def turn(self, req: GuideTurnRequest) -> GuideTurnResponse:
+    async def turn(
+        self,
+        req: GuideTurnRequest,
+        friend_name: str | None = None,
+        memory_prelude: str = "",
+    ) -> GuideTurnResponse:
         if not self._api_key:
             raise RuntimeError(f"Guide LLM key missing for provider '{self._provider}'")
 
-        sys_prompt = _build_system_prompt(req.context, req.relevant_places, req.thread)
+        sys_prompt = _build_system_prompt(
+            req.context,
+            req.relevant_places,
+            req.thread,
+            friend_name=friend_name,
+            memory_prelude=memory_prelude,
+        )
         user_msg = _build_user_message(req)
 
         # Step 1: Call LLM
