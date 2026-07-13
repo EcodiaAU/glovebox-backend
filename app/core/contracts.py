@@ -317,6 +317,14 @@ class CorridorEdge(BaseModel):
     distance_m: int
     duration_s: int
     flags: int = 0
+    # Road name, INTERNED: an index into CorridorGraphPack.names, not the string
+    # itself. Road names repeat brutally in a corridor (one highway can own
+    # thousands of edges), so carrying the literal string per edge bloats the pack
+    # that users pull down over patchy rural connections. `None` = unnamed edge
+    # (a slip lane, a driveway, an unnamed track), which is normal and must stay
+    # cheap. Serialised as `n` to keep the per-edge key short - at hundreds of
+    # thousands of edges the KEY costs as much as the value.
+    n: Optional[int] = None
 
 
 class CorridorGraphPack(BaseModel):
@@ -327,6 +335,10 @@ class CorridorGraphPack(BaseModel):
     bbox: BBox4
     nodes: List[CorridorNode] = Field(default_factory=list)
     edges: List[CorridorEdge] = Field(default_factory=list)
+    # Intern table for edge road names. `CorridorEdge.n` indexes into this.
+    # Absent/empty on packs built before road names existed, which older clients
+    # and older packs must both keep tolerating.
+    names: List[str] = Field(default_factory=list)
 
 
 # Resolve forward reference for CorridorGraphMeta.pack

@@ -328,6 +328,28 @@ class Corridor:
         node_coords: Dict[int, Tuple[float, float]] = {}
         edges_out: list[CorridorEdge] = []
 
+        # Road-name intern table. The edges DB has carried `name` all along and the
+        # readers already SELECT it; it was simply dropped on the floor here, which
+        # is why offline turn-by-turn said a nameless "Turn left" in exactly the
+        # no-signal case the offline router exists for. Names repeat hard (a single
+        # highway owns thousands of edges), so intern them once and let each edge
+        # carry a small integer index.
+        names_out: list[str] = []
+        name_index: Dict[str, int] = {}
+
+        def _intern(raw: Optional[str]) -> Optional[int]:
+            if not raw:
+                return None
+            nm = raw.strip()
+            if not nm:
+                return None
+            idx = name_index.get(nm)
+            if idx is None:
+                idx = len(names_out)
+                name_index[nm] = idx
+                names_out.append(nm)
+            return idx
+
         for row in edge_rows:
             if row.from_id not in node_coords:
                 node_coords[row.from_id] = (row.from_lat, row.from_lng)
@@ -349,6 +371,7 @@ class Corridor:
                     distance_m=int(round(row.dist_m)),
                     duration_s=int(round(row.cost_s)),
                     flags=flags,
+                    n=_intern(row.name),
                 )
             )
 
@@ -367,7 +390,11 @@ class Corridor:
             maxLat=max(all_lats),
         ), 1000)  # small buffer since the graph already covers exactly what we need
 
-        logger.info("corridor pack: %d nodes, %d edges", len(nodes_out), len(edges_out))
+        named_edges = sum(1 for e in edges_out if e.n is not None)
+        logger.info(
+            "corridor pack: %d nodes, %d edges, %d named edges over %d distinct road names",
+            len(nodes_out), len(edges_out), named_edges, len(names_out),
+        )
 
         pack = CorridorGraphPack(
             corridor_key=ckey,
@@ -377,6 +404,7 @@ class Corridor:
             bbox=corridor_bbox,
             nodes=nodes_out,
             edges=edges_out,
+            names=names_out,
         )
 
         created_at = utc_now_iso()

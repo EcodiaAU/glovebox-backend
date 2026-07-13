@@ -779,6 +779,17 @@
             "default": 0,
             "title": "Flags",
             "type": "integer"
+          },
+          "n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N"
           }
         },
         "required": [
@@ -928,6 +939,13 @@
               "$ref": "#/components/schemas/CorridorEdge"
             },
             "title": "Edges",
+            "type": "array"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Names",
             "type": "array"
           },
           "nodes": {
@@ -2939,6 +2957,29 @@
           }
         },
         "title": "GuideContext",
+        "type": "object"
+      },
+      "GuideFriendResponse": {
+        "description": "The signed-in person's resolved Ecodia Friend name, or None when they are\nnot Friend-connected. The floating chat header shows this (fallback 'Friend').",
+        "properties": {
+          "connected": {
+            "default": false,
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "GuideFriendResponse",
         "type": "object"
       },
       "GuideMsg": {
@@ -8116,7 +8157,7 @@
   "paths": {
     "/account": {
       "delete": {
-        "description": "Permanently delete the authenticated user's account and all associated data.\n\nSupabase cascade rules on auth.users ensure all rows in user_entitlements,\nuser_trip_counts, saved_places, roam_plans, roam_plan_members,\nemergency_contacts, and stop_memories are removed automatically.",
+        "description": "Permanently delete the authenticated user's account and all associated data.\n\nSupabase cascade rules on auth.users ensure all rows in user_entitlements,\nuser_trip_counts, saved_places, roam_plans, roam_plan_members, and\nstop_memories are removed automatically.\n\nThere is no emergency-contacts row to delete: emergency contacts come from\nthe phone's own address book and never leave the device (migration 012).",
         "operationId": "delete_account_account_delete",
         "responses": {
           "200": {
@@ -8470,6 +8511,63 @@
         "tags": [
           "entitlement"
         ]
+      }
+    },
+    "/friend/context": {
+      "post": {
+        "operationId": "friend_context_friend_context_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Friend Context",
+        "tags": [
+          "friend"
+        ]
+      }
+    },
+    "/friend/entitlement": {
+      "post": {
+        "operationId": "friend_entitlement_friend_entitlement_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Friend Entitlement",
+        "tags": [
+          "friend"
+        ]
+      }
+    },
+    "/guide/friend": {
+      "get": {
+        "description": "Resolve the signed-in person's Friend name for the floating-chat header.\nReturns {name: null, connected: false} for anonymous or non-Friend users.",
+        "operationId": "guide_friend_guide_friend_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuideFriendResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Guide Friend"
       }
     },
     "/guide/turn": {
