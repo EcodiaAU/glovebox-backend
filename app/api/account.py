@@ -56,9 +56,33 @@ async def delete_account(
 
     try:
         # Exhaustive, FK-safe erasure via the canonical RPC (service_role target).
-        supa.rpc("delete_glovebox_account", {"p_user_id": user.id}).execute()
+        result = supa.rpc("delete_glovebox_account", {"p_user_id": user.id}).execute()
     except Exception as exc:
         logger.error("[account/delete] Failed to delete user %s: %s", user.id, exc)
+        return JSONResponse(
+            ErrorResponse(
+                error="Failed to delete account. Please try again or contact support."
+            ).model_dump(),
+            status_code=500,
+        )
+
+    # The RPC returns the id it actually erased. It targets p_user_id only while
+    # auth.uid() is null, which holds for a service_role JWT (no sub claim). If a
+    # future change hands this route a user-scoped client, auth.uid() would resolve
+    # and the RPC would erase THAT identity instead of the caller's target, silently.
+    # Assert the erased id is the one we asked for rather than trust the precondition.
+    # PostgREST returns the scalar jsonb directly; tolerate a single-row list wrap.
+    payload = result.data
+    if isinstance(payload, list):
+        payload = payload[0] if payload else None
+    deleted_id = payload.get("user_id") if isinstance(payload, dict) else None
+    if str(deleted_id) != str(user.id):
+        logger.error(
+            "[account/delete] RPC erased %s but the request targeted %s; refusing to "
+            "report success",
+            deleted_id,
+            user.id,
+        )
         return JSONResponse(
             ErrorResponse(
                 error="Failed to delete account. Please try again or contact support."
