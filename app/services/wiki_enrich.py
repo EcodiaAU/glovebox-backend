@@ -35,7 +35,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Wikimedia asks every client to send a descriptive User-Agent with contact.
-_UA = "GloveboxRoam/1.0 (https://glovebox.ecodia.au; hello@ecodia.au) httpx"
+_UA = "GloveboxRoam/1.0 (https://glovebox.ecodia.au; code@ecodia.au) httpx"
 _THUMB_W = 480
 _CACHE_TTL_DAYS = 90
 _FETCH_TIMEOUT = 4.0
