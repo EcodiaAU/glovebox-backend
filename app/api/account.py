@@ -2,7 +2,8 @@
 #
 # Account management endpoints.
 # DELETE /account - permanently deletes the authenticated user and all
-# associated data (cascade rules on auth.users handle table cleanup).
+# associated data by invoking the exhaustive `delete_glovebox_account` RPC
+# (the single canonical Glovebox delete path, shared with web + iOS).
 
 from __future__ import annotations
 
@@ -36,15 +37,26 @@ async def delete_account(
     """
     Permanently delete the authenticated user's account and all associated data.
 
-    Supabase cascade rules on auth.users ensure all rows in user_entitlements,
-    user_trip_counts, saved_places, roam_plans, roam_plan_members,
-    emergency_contacts, and stop_memories are removed automatically.
+    Calls the SECURITY DEFINER `delete_glovebox_account` RPC (defined in
+    glovebox/backend/migrations/012), which is the ONLY exhaustive Glovebox
+    delete path and the same RPC web + iOS call. It enumerates every
+    user-keyed table in explicit FK-safe order (public_trip_clones,
+    roam_plan_members, roam_plan_invites, public_trips, roam_plans,
+    saved_places, stop_memories, user_trip_counts, user_entitlements,
+    entitlements) THEN deletes auth.users.
+
+    This replaces the previous raw `auth.admin.delete_user`, which relied on
+    implicit ON DELETE CASCADE and FK-failed on roam_plan_invites.created_by
+    (NO ACTION) the moment a user had created a plan invite. Because this is a
+    trusted service_role call (no JWT sub, so auth.uid() is null), the RPC
+    takes the explicit p_user_id target, mirroring the increment_trip_count
+    call in trips.py.
     """
     supa = get_supabase_admin()
 
     try:
-        # Supabase Admin API: delete the auth user (cascades to all app tables)
-        supa.auth.admin.delete_user(user.id)
+        # Exhaustive, FK-safe erasure via the canonical RPC (service_role target).
+        supa.rpc("delete_glovebox_account", {"p_user_id": user.id}).execute()
     except Exception as exc:
         logger.error("[account/delete] Failed to delete user %s: %s", user.id, exc)
         return JSONResponse(
