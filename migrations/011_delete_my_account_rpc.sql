@@ -11,6 +11,11 @@
 -- public_trips, public_trip_clones, plus the auth-schema children (identities,
 -- sessions, mfa_factors, one_time_tokens, oauth_*, webauthn_*).
 --
+-- SUPERSEDED IN PART: emergency_contacts was dropped by migration 012 (emergency
+-- contacts now come from the phone's address book and never leave the device),
+-- so that name in the cascade list above is historical. The function body is
+-- unaffected, since it never named the table.
+--
 -- Runs as the function owner (postgres) so it has privilege on auth.users.
 -- This replaces the stale Cloud Run DELETE /account path for the native iOS
 -- app, which could not be redeployed (gcloud auth blocked). The native client
