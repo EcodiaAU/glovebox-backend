@@ -38,8 +38,15 @@ class Settings(BaseSettings):
 
     # Versioning
     algo_version: str = Field(default="navpack.v1.osrm.mld", alias="ALGO_VERSION")
+    # v17 (2026-07-16): road names. This version string is part of `corridor_key`,
+    # so it is the ONLY thing that invalidates a cached pack. Road names landed in
+    # v16's pack shape without a bump, and that was a live foot-gun: `names` defaults
+    # to [] and `CorridorEdge.n` to None, so a stale nameless pack validates cleanly
+    # against the new model and is served as "no road names" - a false negative that
+    # looks exactly like broken plumbing rather than a stale cache.
+    # RULE: change what goes INTO a pack, bump this in the same commit.
     corridor_algo_version: str = Field(
-        default="corridor.v16.tree", alias="CORRIDOR_ALGO_VERSION"
+        default="corridor.v17.names", alias="CORRIDOR_ALGO_VERSION"
     )
     places_algo_version: str = Field(
         default="places.v3.address.house_number", alias="PLACES_ALGO_VERSION"
