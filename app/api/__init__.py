@@ -30,6 +30,7 @@ from .ai_trip import router as ai_trip_router
 from .account import router as account_router
 from .entitlement import router as entitlement_router
 from .friend_context import router as friend_context_router
+from .friend_action import router as friend_action_router
 from .friend_entitlement import router as friend_entitlement_router
 
 api_router = APIRouter()
@@ -61,4 +62,5 @@ api_router.include_router(ai_trip_router)
 api_router.include_router(account_router)
 api_router.include_router(entitlement_router)
 api_router.include_router(friend_context_router)
+api_router.include_router(friend_action_router)
 api_router.include_router(friend_entitlement_router)

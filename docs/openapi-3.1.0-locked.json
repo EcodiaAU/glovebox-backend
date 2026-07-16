@@ -8157,7 +8157,7 @@
   "paths": {
     "/account": {
       "delete": {
-        "description": "Permanently delete the authenticated user's account and all associated data.\n\nSupabase cascade rules on auth.users ensure all rows in user_entitlements,\nuser_trip_counts, saved_places, roam_plans, roam_plan_members, and\nstop_memories are removed automatically.\n\nThere is no emergency-contacts row to delete: emergency contacts come from\nthe phone's own address book and never leave the device (migration 012).",
+        "description": "Permanently delete the authenticated user's account and all associated data.\n\nCalls the SECURITY DEFINER `delete_glovebox_account` RPC (defined in\nglovebox/backend/migrations/012), which is the ONLY exhaustive Glovebox\ndelete path and the same RPC web + iOS call. It enumerates every\nuser-keyed table in explicit FK-safe order (public_trip_clones,\nroam_plan_members, roam_plan_invites, public_trips, roam_plans,\nsaved_places, stop_memories, user_trip_counts, user_entitlements,\nentitlements) THEN deletes auth.users.\n\nThis replaces the previous raw `auth.admin.delete_user`, which relied on\nimplicit ON DELETE CASCADE and FK-failed on roam_plan_invites.created_by\n(NO ACTION) the moment a user had created a plan invite. Because this is a\ntrusted service_role call (no JWT sub, so auth.uid() is null), the RPC\ntakes the explicit p_user_id target, mirroring the increment_trip_count\ncall in trips.py.",
         "operationId": "delete_account_account_delete",
         "responses": {
           "200": {
@@ -8510,6 +8510,25 @@
         "summary": "Redeem Entitlement",
         "tags": [
           "entitlement"
+        ]
+      }
+    },
+    "/friend/action": {
+      "post": {
+        "operationId": "friend_action_friend_action_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Friend Action",
+        "tags": [
+          "friend"
         ]
       }
     },
